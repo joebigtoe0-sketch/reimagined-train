@@ -56,12 +56,28 @@ const wsClients = new Set<WebSocket>();
 const engine = new RuntimeEngine(dbPoolAvailable, redis, env.INGEST_INTERVAL_MS, env.SNAPSHOT_INTERVAL_MS, repo);
 
 app.get("/health", async () => ({ ok: true }));
-app.get("/api/tokens", async () => ({ tokens: engine.listTokens() }));
-app.get("/api/alerts", async () => ({ alerts: engine.listAlerts() }));
-app.get("/api/probabilities", async () => ({ probabilities: engine.listProbabilities() }));
+app.get("/api/tokens", async () => {
+  const tokens = await repo.listTokens(200);
+  return { tokens: tokens.length > 0 ? tokens : engine.listTokens() };
+});
+app.get("/api/alerts", async () => {
+  const alerts = await repo.listAlerts(200);
+  return { alerts: alerts.length > 0 ? alerts : engine.listAlerts() };
+});
+app.get("/api/probabilities", async () => {
+  const probabilities = await repo.listProbabilities(500);
+  return { probabilities: probabilities.length > 0 ? probabilities : engine.listProbabilities() };
+});
 app.get("/api/backtest/calibration", async () => ({ report: engine.calibrationReport() }));
 app.get("/api/backtest/replay", async () => ({ replay: engine.listReplay() }));
-app.get("/api/ops/metrics", async () => ({ metrics: getMetrics(), queue: engine.queueStats() }));
+app.get("/api/ops/metrics", async () => {
+  const metrics = getMetrics();
+  const persistedEvents = await repo.countRawEvents();
+  return {
+    metrics: { ...metrics, eventsProcessed: Math.max(metrics.eventsProcessed, persistedEvents) },
+    queue: engine.queueStats()
+  };
+});
 app.get("/api/ops/deadletters", async () => ({ deadLetters: engine.deadLetters(100) }));
 app.post("/api/ops/deadletters/replay", async (request) => {
   const body = (request.body ?? {}) as { limit?: number };
@@ -112,14 +128,15 @@ app.post("/webhooks/helius", async (request, reply) => {
   return { ok: true, accepted: count };
 });
 
-app.get("/ws", { websocket: true }, (connection) => {
+app.get("/ws", { websocket: true }, async (connection) => {
   wsClients.add(connection.socket);
+  const [tokens, alerts, probabilities] = await Promise.all([repo.listTokens(200), repo.listAlerts(200), repo.listProbabilities(200)]);
   connection.socket.send(
     JSON.stringify({
       type: "bootstrap",
-      tokens: engine.listTokens(),
-      alerts: engine.listAlerts(),
-      probabilities: engine.listProbabilities().slice(0, 20),
+      tokens,
+      alerts,
+      probabilities: probabilities.slice(0, 20),
       metrics: getMetrics()
     })
   );

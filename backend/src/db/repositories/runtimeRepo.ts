@@ -224,4 +224,139 @@ export class RuntimeRepo {
     const result = await this.pool.query(text, values);
     return result.rows as T[];
   }
+
+  async listTokens(limit = 100): Promise<TokenState[]> {
+    const rows = await this.rawQuery<{
+      mint: string;
+      symbol: string;
+      dev_wallet: string;
+      created_at: string;
+      current_mc: number;
+      ath_mc: number;
+      holder_count: number;
+      buy_count: number;
+      sell_count: number;
+      volume: number;
+      smart_wallet_count: number;
+      smart_wallet_net_flow: number;
+      insider_concentration: number;
+      lifecycle: TokenState["lifecycle"];
+      continuation?: number;
+      migration?: number;
+      rug?: number;
+      hit25k_before10k?: number;
+      hit100k_before25k?: number;
+      hit30k_before10k?: number;
+      local_top?: number;
+      local_top_within_n_minutes?: number;
+      score?: number;
+    }>(
+      `SELECT t.mint, t.symbol, t.dev_wallet, t.created_at, t.current_mc, t.ath_mc, t.holder_count, t.buy_count, t.sell_count, t.volume,
+              t.smart_wallet_count, t.smart_wallet_net_flow, t.insider_concentration, t.lifecycle,
+              ph.continuation, ph.migration, ph.rug, ph.hit25k_before10k, ph.hit100k_before25k, ph.hit30k_before10k, ph.local_top, ph.local_top_within_n_minutes, ph.score
+       FROM tokens t
+       LEFT JOIN LATERAL (
+         SELECT continuation, migration, rug, hit25k_before10k, hit100k_before25k, hit30k_before10k, local_top, local_top_within_n_minutes, score
+         FROM probability_history p
+         WHERE p.mint = t.mint
+         ORDER BY p.ts DESC
+         LIMIT 1
+       ) ph ON TRUE
+       ORDER BY t.current_mc DESC
+       LIMIT $1`,
+      [limit]
+    );
+
+    return rows.map((r) => ({
+      mint: r.mint,
+      symbol: r.symbol,
+      devWallet: r.dev_wallet,
+      createdAt: r.created_at,
+      marketCap: Number(r.current_mc ?? 0),
+      athMarketCap: Number(r.ath_mc ?? 0),
+      holderCount: Number(r.holder_count ?? 0),
+      buyCount: Number(r.buy_count ?? 0),
+      sellCount: Number(r.sell_count ?? 0),
+      volume: Number(r.volume ?? 0),
+      smartWalletCount: Number(r.smart_wallet_count ?? 0),
+      smartWalletNetFlow: Number(r.smart_wallet_net_flow ?? 0),
+      devScore: 50,
+      insiderConcentration: Number(r.insider_concentration ?? 0),
+      probabilityContinuation: Number(r.continuation ?? 0),
+      probabilityMigration: Number(r.migration ?? 0),
+      probabilityRug: Number(r.rug ?? 0),
+      probabilityHit25kBefore10k: Number(r.hit25k_before10k ?? 0),
+      probabilityHit100kBefore25k: Number(r.hit100k_before25k ?? 0),
+      probabilityHit30kBefore10k: Number(r.hit30k_before10k ?? 0),
+      probabilityLocalTop: Number(r.local_top ?? 0),
+      probabilityLocalTopWithinNMinutes: Number(r.local_top_within_n_minutes ?? 0),
+      score: Number(r.score ?? 0),
+      lifecycle: r.lifecycle ?? "new"
+    }));
+  }
+
+  async listAlerts(limit = 100): Promise<AlertEvent[]> {
+    const rows = await this.rawQuery<{
+      id: string;
+      mint: string;
+      severity: "info" | "warning" | "critical";
+      alert_type: string;
+      message: string;
+      created_at: string;
+    }>(
+      `SELECT id, mint, severity, alert_type, message, created_at
+       FROM alerts
+       ORDER BY created_at DESC
+       LIMIT $1`,
+      [limit]
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      tokenMint: r.mint,
+      severity: r.severity,
+      type: r.alert_type,
+      message: r.message,
+      createdAt: r.created_at
+    }));
+  }
+
+  async listProbabilities(limit = 200): Promise<ProbabilityRecord[]> {
+    const rows = await this.rawQuery<{
+      mint: string;
+      ts: string;
+      continuation: number;
+      migration: number;
+      rug: number;
+      hit25k_before10k: number;
+      hit100k_before25k: number;
+      hit30k_before10k: number;
+      local_top: number;
+      local_top_within_n_minutes: number;
+      score: number;
+    }>(
+      `SELECT mint, ts, continuation, migration, rug, hit25k_before10k, hit100k_before25k, hit30k_before10k, local_top, local_top_within_n_minutes, score
+       FROM probability_history
+       ORDER BY ts DESC
+       LIMIT $1`,
+      [limit]
+    );
+    return rows.map((r) => ({
+      mint: r.mint,
+      timestamp: r.ts,
+      continuation: Number(r.continuation ?? 0),
+      migration: Number(r.migration ?? 0),
+      rug: Number(r.rug ?? 0),
+      hit25kBefore10k: Number(r.hit25k_before10k ?? 0),
+      hit100kBefore25k: Number(r.hit100k_before25k ?? 0),
+      hit30kBefore10k: Number(r.hit30k_before10k ?? 0),
+      localTop: Number(r.local_top ?? 0),
+      localTopWithinNMinutes: Number(r.local_top_within_n_minutes ?? 0),
+      score: Number(r.score ?? 0)
+    }));
+  }
+
+  async countRawEvents(): Promise<number> {
+    const rows = await this.rawQuery<{ count: string }>(`SELECT COUNT(*)::text AS count FROM raw_events`);
+    return Number(rows[0]?.count ?? "0");
+  }
 }
