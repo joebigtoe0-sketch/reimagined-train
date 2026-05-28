@@ -8,7 +8,7 @@ const envSchema = z.object({
   REDIS_URL: z.string().default("redis://localhost:6379"),
   DATABASE_URL: z.string().default("postgresql://pump:pump@localhost:5432/pumpfun"),
   SNAPSHOT_INTERVAL_MS: z.coerce.number().default(5000),
-  INGEST_INTERVAL_MS: z.coerce.number().default(1200),
+  INGEST_INTERVAL_MS: z.coerce.number().default(10000),
   HELIUS_API_KEY: z.string().optional(),
   HELIUS_RPC_URL: z.string().default("https://mainnet.helius-rpc.com/?api-key="),
   HELIUS_MONITORED_WALLETS: z.string().default(""),

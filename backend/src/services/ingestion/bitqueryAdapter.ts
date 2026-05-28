@@ -51,8 +51,10 @@ export interface BitqueryTrade {
 // ─── GraphQL queries ────────────────────────────────────────────────────────
 
 // Use Instructions query — reads name/symbol directly from on-chain tx args.
-// TokenSupplyUpdates.Currency.Name/Symbol are often empty for brand-new tokens
-// because metadata indexing has a delay. Instructions args are always immediate.
+// We always look back LOOKBACK_MS to handle Bitquery indexing delay.
+// seenMints deduplicates so we never double-count.
+const LOOKBACK_MS = 5 * 60_000; // 5-minute rolling window
+
 const NEW_TOKENS_QUERY = `
 query NewPumpTokens($since: DateTime) {
   Solana {
@@ -68,7 +70,7 @@ query NewPumpTokens($since: DateTime) {
         Transaction: { Result: { Success: true } }
       }
       orderBy: { descending: Block_Time }
-      limit: { count: 100 }
+      limit: { count: 500 }
     ) {
       Block { Time }
       Transaction { Signer Signature }
@@ -134,7 +136,6 @@ query PumpTrades($since: DateTime, $mints: [String!]) {
 export class BitqueryAdapter {
   private seenMints = new Set<string>();
   private seenTradeSigs = new Set<string>();
-  private lastLaunchPollAt: Date = new Date(Date.now() - 60_000);
   private lastTradePollAt: Date = new Date(Date.now() - 60_000);
   private initialized = false;
   private _verified = false;
@@ -188,11 +189,20 @@ export class BitqueryAdapter {
     }
   }
 
-  /** Poll for newly launched tokens. Returns only genuinely new mints. */
+  /**
+   * Poll for new Pump.fun token launches.
+   *
+   * Strategy: always query the last LOOKBACK_MS window (5 minutes) and
+   * deduplicate via seenMints. This absorbs any Bitquery indexing delay —
+   * a token created 2 minutes ago will be caught on every poll until it's
+   * in seenMints. The first poll seeds seenMints (no tokens emitted) so
+   * we don't replay historical launches on startup.
+   */
   async pollNewLaunches(): Promise<BitqueryToken[]> {
     if (!this.available) return [];
 
-    const since = this.lastLaunchPollAt.toISOString();
+    // Always look back LOOKBACK_MS to catch indexing-delayed tokens.
+    const since = new Date(Date.now() - LOOKBACK_MS).toISOString();
 
     try {
       const data = await this.query<{
@@ -215,19 +225,17 @@ export class BitqueryAdapter {
         };
       }>(NEW_TOKENS_QUERY, { since });
 
-      this.lastLaunchPollAt = new Date();
-
       const instructions = data?.Solana?.Instructions ?? [];
 
       if (!this.initialized) {
+        // First poll: seed ALL mints from the lookback window so we skip them.
         this.initialized = true;
-        // Seed seen mints from first-poll backlog so we don't replay them.
         let seeded = 0;
         for (const ix of instructions) {
           const mint = extractMint(ix.Instruction);
           if (mint) { this.seenMints.add(mint); seeded++; }
         }
-        console.log(`[Bitquery] initialized. seeded ${seeded} existing mints (skipping backlog).`);
+        console.log(`[Bitquery] initialized. seeded ${seeded} existing mints from last 5min (skipping backlog).`);
         return [];
       }
 
@@ -251,11 +259,11 @@ export class BitqueryAdapter {
       }
 
       if (results.length > 0) {
-        console.log(`[Bitquery] ${results.length} new token(s): ${results.map(r => `$${r.symbol} (${r.name})`).join(", ")}`);
+        console.log(`[Bitquery] +${results.length} new token(s): ${results.map(r => `$${r.symbol}`).join(", ")}`);
       }
 
-      if (this.seenMints.size > 30_000) {
-        this.seenMints = new Set([...this.seenMints].slice(-15_000));
+      if (this.seenMints.size > 50_000) {
+        this.seenMints = new Set([...this.seenMints].slice(-25_000));
       }
 
       return results;
