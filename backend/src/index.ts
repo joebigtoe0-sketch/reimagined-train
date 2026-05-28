@@ -95,7 +95,15 @@ app.post("/api/alerts/simulate", async (request) => {
 });
 app.post("/webhooks/helius", async (request, reply) => {
   const webhookSecret = env.HELIUS_WEBHOOK_SECRET;
-  const incomingSecret = request.headers["x-helius-secret"];
+  const xHeliusSecret = request.headers["x-helius-secret"];
+  const authorization = request.headers["authorization"];
+  const authToken =
+    typeof authorization === "string" && authorization.startsWith("Bearer ")
+      ? authorization.slice("Bearer ".length).trim()
+      : authorization;
+  const incomingSecret =
+    (typeof xHeliusSecret === "string" ? xHeliusSecret : undefined) ??
+    (typeof authToken === "string" ? authToken : undefined);
   if (webhookSecret && incomingSecret !== webhookSecret) {
     return reply.status(401).send({ ok: false, error: "unauthorized" });
   }
