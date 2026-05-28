@@ -2,11 +2,12 @@ import { env } from "../../config/env.js";
 import type { HeliusRawEvent } from "../../domain/events/normalizer.js";
 import { decodeEnhancedTransactions, PUMPFUN_PROGRAM_ADDRESSES } from "./heliusDecoder.js";
 
-const HELIUS_API_BASE = "https://api.helius.xyz";
 const HELIUS_REST_BASE = "https://api.helius.xyz/v0";
 
-// Pump.fun bonding curve migration happens at ~$69k. We poll both the AMM + legacy.
-const DEFAULT_POLL_TYPES = ["SWAP", "CREATE", "TOKEN_MINT", "TRANSFER", "UNKNOWN"].join(",");
+// When scanning the Pump.fun program we only want to find brand-new launches.
+// Buys/sells are fetched per-mint AFTER we've discovered the mint from a launch event.
+const LAUNCH_TYPES = "CREATE,TOKEN_MINT,UNKNOWN";
+const TRADE_TYPES = "SWAP,TRANSFER";
 
 export interface CoverageSnapshot {
   trackedWallets: number;
@@ -15,6 +16,7 @@ export interface CoverageSnapshot {
   signaturesSeen: number;
   lastPollAt?: string;
   lastEventCount: number;
+  mode: "launch-discovery + per-mint-trades";
 }
 
 function parseList(value: string): string[] {
@@ -89,7 +91,8 @@ export class HeliusAdapter {
       globalAddresses: this.globalAddresses.length,
       signaturesSeen: this.seenSignatures.size,
       lastPollAt: this.lastPollAt,
-      lastEventCount: this.lastEventCount
+      lastEventCount: this.lastEventCount,
+      mode: "launch-discovery + per-mint-trades"
     };
   }
 
@@ -98,34 +101,36 @@ export class HeliusAdapter {
 
     const results: HeliusRawEvent[] = [];
 
-    // Primary: poll each Pump.fun program via Helius Enhanced Transactions REST API.
-    // This is far more efficient than RPC getSignaturesForAddress + separate enhanced fetch:
-    // one HTTP call returns already-decoded transaction objects directly.
+    // Step 1 — scan Pump.fun program addresses for LAUNCH events only.
+    // This finds tokens the moment they are created, not their ongoing trades.
     for (const programId of this.globalAddresses) {
       try {
-        const batch = await this.fetchProgramTransactions(programId);
+        const batch = await this.fetchAddressTransactions(programId, LAUNCH_TYPES);
         results.push(...batch);
-      } catch {
-        // skip individual address failures
-      }
+        // Every discovered mint gets added to tracked mints so we start following its trades.
+        for (const ev of batch) {
+          if (ev.type === "launch" && ev.mint && ev.mint !== "UNKNOWN_MINT") {
+            this.addDiscoveredMint(ev.mint);
+          }
+          for (const m of ev.mints ?? []) this.addDiscoveredMint(m);
+        }
+      } catch { /* skip */ }
     }
 
-    // Secondary: poll any active tracked mints (buyers/sellers discovered so far)
-    // We pick the most recently discovered mints only to stay within rate budget.
-    const mintSlice = [...this.trackedMints].slice(-Math.min(20, this.trackedMints.size));
+    // Step 2 — fetch buys/sells for each tracked mint (tokens we've already discovered).
+    // This is how we track price action and holder behaviour from launch onward.
+    // We poll the most recently active mints first to stay within rate limits.
+    const mintSlice = [...this.trackedMints].slice(-Math.min(30, this.trackedMints.size));
     for (const mint of mintSlice) {
       try {
-        const batch = await this.fetchProgramTransactions(mint);
+        const batch = await this.fetchAddressTransactions(mint, TRADE_TYPES);
         results.push(...batch);
-      } catch {
-        // skip
-      }
+      } catch { /* skip */ }
     }
 
     this.lastPollAt = new Date().toISOString();
     this.lastEventCount = results.length;
 
-    // Trim seen set so memory doesn't grow unboundedly
     if (this.seenSignatures.size > 10_000) {
       this.seenSignatures = new Set([...this.seenSignatures].slice(-6_000));
     }
@@ -133,11 +138,11 @@ export class HeliusAdapter {
     return results;
   }
 
-  private async fetchProgramTransactions(address: string): Promise<HeliusRawEvent[]> {
+  private async fetchAddressTransactions(address: string, types: string): Promise<HeliusRawEvent[]> {
     const params = new URLSearchParams({
       "api-key": env.HELIUS_API_KEY!,
       limit: String(env.HELIUS_SIGNATURE_LIMIT),
-      type: DEFAULT_POLL_TYPES
+      type: types
     });
     const before = this.beforeSignatures.get(address);
     if (before) params.set("before", before);
@@ -149,11 +154,8 @@ export class HeliusAdapter {
     const txns = (await res.json()) as unknown[];
     if (!Array.isArray(txns) || txns.length === 0) return [];
 
-    // Advance cursor to oldest signature in this page so next poll gets newer txns
     const lastTx = txns[txns.length - 1] as { signature?: string };
-    if (lastTx?.signature) {
-      this.beforeSignatures.set(address, lastTx.signature);
-    }
+    if (lastTx?.signature) this.beforeSignatures.set(address, lastTx.signature);
 
     const decoded = decodeEnhancedTransactions(txns);
     return dedup(decoded, this.seenSignatures);
@@ -169,7 +171,7 @@ export class HeliusAdapter {
 
     for (const programId of this.globalAddresses) {
       try {
-        const params = new URLSearchParams({ "api-key": env.HELIUS_API_KEY ?? "", limit: "1" });
+        const params = new URLSearchParams({ "api-key": env.HELIUS_API_KEY ?? "", limit: "1", type: LAUNCH_TYPES });
         const res = await fetch(`${HELIUS_REST_BASE}/addresses/${programId}/transactions?${params.toString()}`, {
           signal: AbortSignal.timeout(6000)
         });

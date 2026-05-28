@@ -52,6 +52,9 @@ function detectType(tx: Json): EventType {
   if (txType.includes("SWAP") || txType.includes("NFT_SALE")) return "trade";
   if (txType.includes("TRANSFER")) return "transfer";
 
+  // UNKNOWN transactions touching Pump.fun program → treat as launch
+  if (txType === "UNKNOWN" && instructionTouchesPumpfun(tx)) return "launch";
+
   const events = tx.events as Json | undefined;
   if (events && typeof events === "object" && "swap" in events) return "trade";
 
