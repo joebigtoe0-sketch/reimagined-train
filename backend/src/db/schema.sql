@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS raw_events (
 
 CREATE TABLE IF NOT EXISTS tokens (
   mint TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
   symbol TEXT NOT NULL,
   dev_wallet TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL,

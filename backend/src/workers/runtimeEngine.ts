@@ -9,6 +9,7 @@ import { replayTokenTimeline } from "../services/backtest/replayEngine.js";
 import { buildWalletGraph } from "../services/graph/walletGraph.js";
 import { scoreClusterRisk } from "../services/graph/clusterRisk.js";
 import { HeliusAdapter } from "../services/ingestion/heliusAdapter.js";
+import { enqueueMeta } from "../services/ingestion/tokenMetadata.js";
 import { updateDeveloperProfile } from "../services/intelligence/developerIntelligence.js";
 import { updateWalletProfile } from "../services/intelligence/walletIntelligence.js";
 import { buildFeatureRows } from "../services/ml/featurePipeline.js";
@@ -197,7 +198,8 @@ export class RuntimeEngine {
       existing ??
       {
         mint: event.mint,
-        symbol: event.mint.slice(0, 6),
+        name: `Token ${event.mint.slice(0, 6)}`,
+        symbol: event.mint.slice(0, 6).toUpperCase(),
         devWallet: inferredDev ?? randomDev(event.wallet),
         createdAt: event.timestamp,
         marketCap: Math.max(1_000, event.marketCap || 3_000),
@@ -224,6 +226,19 @@ export class RuntimeEngine {
 
     if (existing && inferredDev && token.devWallet.startsWith("DEV_")) {
       token.devWallet = inferredDev;
+    }
+
+    // Fetch on-chain name/symbol if we still have a placeholder
+    if (!existing || token.name.startsWith("Token ")) {
+      enqueueMeta(event.mint, (meta) => {
+        const t = this.state.tokens.get(meta.mint);
+        if (t) {
+          t.name = meta.name;
+          t.symbol = meta.symbol;
+          this.state.tokens.set(meta.mint, t);
+          void this.repo.upsertToken(t);
+        }
+      });
     }
 
     token.marketCap = event.marketCap > 0 ? event.marketCap : token.marketCap;

@@ -1,16 +1,26 @@
 export type TokenState = {
   mint: string;
+  name: string;
   symbol: string;
   marketCap: number;
+  athMarketCap?: number;
   holderCount: number;
+  buyCount: number;
+  sellCount: number;
+  volume?: number;
   smartWalletCount: number;
   smartWalletNetFlow: number;
   probabilityContinuation: number;
   probabilityMigration: number;
   probabilityRug: number;
   probabilityHit30kBefore10k: number;
+  probabilityHit25kBefore10k?: number;
+  probabilityHit100kBefore25k?: number;
   probabilityLocalTop: number;
+  probabilityLocalTopWithinNMinutes?: number;
   devScore: number;
+  insiderConcentration?: number;
+  score?: number;
   lifecycle: "new" | "accumulation" | "distribution" | "failed" | "migrated";
 };
 

@@ -42,6 +42,7 @@ export function launchToken(): TokenState {
   const mint = randomMint();
   const token: TokenState = {
     mint,
+    name: `Token ${mint.slice(0, 6)}`,
     symbol: mint.slice(0, 6),
     devWallet: randomWallet(),
     createdAt: new Date().toISOString(),

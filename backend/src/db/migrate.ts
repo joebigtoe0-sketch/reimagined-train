@@ -17,6 +17,14 @@ export async function runStartupMigrations(): Promise<void> {
   }
   const sql = fs.readFileSync(schemaPath, "utf8");
   await pool.query(sql);
+
+  // Incremental column additions that are safe to re-run
+  const incremental: string[] = [
+    `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT ''`
+  ];
+  for (const stmt of incremental) {
+    await pool.query(stmt);
+  }
 }
 
 export async function assertRequiredTables(repo: RuntimeRepo): Promise<void> {

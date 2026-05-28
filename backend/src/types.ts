@@ -12,6 +12,7 @@ export type WalletCategory =
 
 export interface TokenState {
   mint: string;
+  name: string;
   symbol: string;
   devWallet: string;
   createdAt: string;

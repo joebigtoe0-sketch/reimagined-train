@@ -29,13 +29,18 @@ export class RuntimeRepo {
   async upsertToken(token: TokenState): Promise<void> {
     if (!this.pool) return;
     await this.pool.query(
-      `INSERT INTO tokens (mint, symbol, dev_wallet, created_at, current_mc, ath_mc, holder_count, buy_count, sell_count, volume, smart_wallet_count, smart_wallet_net_flow, insider_concentration, lifecycle)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-       ON CONFLICT (mint) DO UPDATE SET current_mc = EXCLUDED.current_mc, ath_mc = EXCLUDED.ath_mc, holder_count = EXCLUDED.holder_count,
-         buy_count = EXCLUDED.buy_count, sell_count = EXCLUDED.sell_count, volume = EXCLUDED.volume, smart_wallet_count = EXCLUDED.smart_wallet_count,
-         smart_wallet_net_flow = EXCLUDED.smart_wallet_net_flow, insider_concentration = EXCLUDED.insider_concentration, lifecycle = EXCLUDED.lifecycle`,
+      `INSERT INTO tokens (mint, name, symbol, dev_wallet, created_at, current_mc, ath_mc, holder_count, buy_count, sell_count, volume, smart_wallet_count, smart_wallet_net_flow, insider_concentration, lifecycle)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+       ON CONFLICT (mint) DO UPDATE SET
+         name = CASE WHEN EXCLUDED.name != '' AND EXCLUDED.name NOT LIKE 'Token %' THEN EXCLUDED.name ELSE tokens.name END,
+         symbol = CASE WHEN EXCLUDED.symbol != '' AND length(EXCLUDED.symbol) > 4 THEN EXCLUDED.symbol ELSE tokens.symbol END,
+         current_mc = EXCLUDED.current_mc, ath_mc = EXCLUDED.ath_mc, holder_count = EXCLUDED.holder_count,
+         buy_count = EXCLUDED.buy_count, sell_count = EXCLUDED.sell_count, volume = EXCLUDED.volume,
+         smart_wallet_count = EXCLUDED.smart_wallet_count, smart_wallet_net_flow = EXCLUDED.smart_wallet_net_flow,
+         insider_concentration = EXCLUDED.insider_concentration, lifecycle = EXCLUDED.lifecycle`,
       [
         token.mint,
+        token.name,
         token.symbol,
         token.devWallet,
         token.createdAt,
@@ -228,6 +233,7 @@ export class RuntimeRepo {
   async listTokens(limit = 100): Promise<TokenState[]> {
     const rows = await this.rawQuery<{
       mint: string;
+      name: string;
       symbol: string;
       dev_wallet: string;
       created_at: string;
@@ -251,7 +257,7 @@ export class RuntimeRepo {
       local_top_within_n_minutes?: number;
       score?: number;
     }>(
-      `SELECT t.mint, t.symbol, t.dev_wallet, t.created_at, t.current_mc, t.ath_mc, t.holder_count, t.buy_count, t.sell_count, t.volume,
+      `SELECT t.mint, COALESCE(t.name, '') AS name, t.symbol, t.dev_wallet, t.created_at, t.current_mc, t.ath_mc, t.holder_count, t.buy_count, t.sell_count, t.volume,
               t.smart_wallet_count, t.smart_wallet_net_flow, t.insider_concentration, t.lifecycle,
               ph.continuation, ph.migration, ph.rug, ph.hit25k_before10k, ph.hit100k_before25k, ph.hit30k_before10k, ph.local_top, ph.local_top_within_n_minutes, ph.score
        FROM tokens t
@@ -269,6 +275,7 @@ export class RuntimeRepo {
 
     return rows.map((r) => ({
       mint: r.mint,
+      name: r.name || `Token ${r.mint.slice(0, 6)}`,
       symbol: r.symbol,
       devWallet: r.dev_wallet,
       createdAt: r.created_at,
