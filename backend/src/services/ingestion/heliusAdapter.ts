@@ -45,8 +45,11 @@ export class HeliusAdapter {
   private lastPollAt?: string;
   private lastEventCount = 0;
 
-  // Cursor per program address for paginated polling
-  private beforeSignatures = new Map<string, string | undefined>();
+  // High-water mark per address: the newest signature we've already processed.
+  // On first poll we set this without processing anything (skips historical backlog).
+  // On subsequent polls we stop processing once we reach this signature.
+  private highWaterMarks = new Map<string, string>();
+  private initialized = new Set<string>(); // addresses whose first poll has completed
 
   constructor() {
     const userGlobals = parseList(env.HELIUS_GLOBAL_ADDRESSES);
@@ -102,28 +105,26 @@ export class HeliusAdapter {
     const results: HeliusRawEvent[] = [];
 
     // Step 1 — scan Pump.fun program addresses for LAUNCH events only.
-    // This finds tokens the moment they are created, not their ongoing trades.
+    // First poll per address just sets the high-water mark (skips historical backlog).
+    // Every subsequent poll only returns genuinely new events since the last poll.
     for (const programId of this.globalAddresses) {
       try {
-        const batch = await this.fetchAddressTransactions(programId, LAUNCH_TYPES);
-        results.push(...batch);
-        // Every discovered mint gets added to tracked mints so we start following its trades.
+        const batch = await this.fetchNewTransactions(programId, LAUNCH_TYPES);
         for (const ev of batch) {
           if (ev.type === "launch" && ev.mint && ev.mint !== "UNKNOWN_MINT") {
             this.addDiscoveredMint(ev.mint);
           }
           for (const m of ev.mints ?? []) this.addDiscoveredMint(m);
         }
+        results.push(...batch);
       } catch { /* skip */ }
     }
 
-    // Step 2 — fetch buys/sells for each tracked mint (tokens we've already discovered).
-    // This is how we track price action and holder behaviour from launch onward.
-    // We poll the most recently active mints first to stay within rate limits.
+    // Step 2 — fetch buys/sells only for mints we discovered via launches.
     const mintSlice = [...this.trackedMints].slice(-Math.min(30, this.trackedMints.size));
     for (const mint of mintSlice) {
       try {
-        const batch = await this.fetchAddressTransactions(mint, TRADE_TYPES);
+        const batch = await this.fetchNewTransactions(mint, TRADE_TYPES);
         results.push(...batch);
       } catch { /* skip */ }
     }
@@ -138,26 +139,49 @@ export class HeliusAdapter {
     return results;
   }
 
-  private async fetchAddressTransactions(address: string, types: string): Promise<HeliusRawEvent[]> {
+  /**
+   * Fetch transactions for `address` of the given `types`.
+   *
+   * On the very first call per address: records the newest signature as the
+   * high-water mark and returns NOTHING — this skips the historical backlog.
+   *
+   * On every subsequent call: fetches the page and returns only transactions
+   * that are newer than the stored high-water mark, then advances the mark.
+   */
+  private async fetchNewTransactions(address: string, types: string): Promise<HeliusRawEvent[]> {
     const params = new URLSearchParams({
       "api-key": env.HELIUS_API_KEY!,
       limit: String(env.HELIUS_SIGNATURE_LIMIT),
       type: types
     });
-    const before = this.beforeSignatures.get(address);
-    if (before) params.set("before", before);
 
     const url = `${HELIUS_REST_BASE}/addresses/${address}/transactions?${params.toString()}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
     if (!res.ok) return [];
 
-    const txns = (await res.json()) as unknown[];
+    const txns = (await res.json()) as Array<{ signature?: string }>;
     if (!Array.isArray(txns) || txns.length === 0) return [];
 
-    const lastTx = txns[txns.length - 1] as { signature?: string };
-    if (lastTx?.signature) this.beforeSignatures.set(address, lastTx.signature);
+    // Helius returns newest-first. The first item is the most recent transaction.
+    const newestSig = txns[0]?.signature ?? "";
 
-    const decoded = decodeEnhancedTransactions(txns);
+    if (!this.initialized.has(address)) {
+      // First poll: set the mark to current chain tip, don't process anything.
+      this.initialized.add(address);
+      if (newestSig) this.highWaterMarks.set(address, newestSig);
+      return [];
+    }
+
+    // Subsequent polls: only process transactions newer than our high-water mark.
+    const waterMark = this.highWaterMarks.get(address);
+    const fresh = waterMark
+      ? txns.filter((tx) => tx.signature && tx.signature !== waterMark)
+      : txns;
+
+    // Advance the high-water mark to the newest signature in this page.
+    if (newestSig) this.highWaterMarks.set(address, newestSig);
+
+    const decoded = decodeEnhancedTransactions(fresh);
     return dedup(decoded, this.seenSignatures);
   }
 
