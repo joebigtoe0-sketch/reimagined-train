@@ -1,8 +1,10 @@
-import type { Pool } from "pg";
 import type { AlertEvent, CanonicalEvent, DeveloperProfile, ProbabilityRecord, TokenState, WalletProfile } from "../../types.js";
+type QueryablePool = {
+  query: (text: string, values?: unknown[]) => Promise<unknown>;
+};
 
 export class RuntimeRepo {
-  constructor(private readonly pool: Pool | null) {}
+  constructor(private readonly pool: QueryablePool | null) {}
 
   async insertEvent(event: CanonicalEvent): Promise<void> {
     if (!this.pool) return;
