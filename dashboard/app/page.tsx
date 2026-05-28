@@ -33,6 +33,13 @@ function fmtMins(m: number): string {
   if (m >= 60) return `${(m / 60).toFixed(1)}h`;
   return `${Math.round(m)}m`;
 }
+function fmtAge(iso: string): string {
+  const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (secs < 60) return `${secs}s ago`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+  return `${Math.floor(secs / 86400)}d ago`;
+}
 
 // ─── shared components ─────────────────────────────────────────────────────
 function CopyButton({ value }: { value: string }): ReactElement {
@@ -97,7 +104,7 @@ interface CoverageSnapshot {
 }
 
 // ─── token filters ─────────────────────────────────────────────────────────
-type SortField = "marketCap" | "holderCount" | "smartWalletCount" | "probabilityContinuation"
+type SortField = "createdAt" | "marketCap" | "holderCount" | "smartWalletCount" | "probabilityContinuation"
   | "probabilityMigration" | "probabilityRug" | "probabilityHit30kBefore10k"
   | "probabilityLocalTop" | "buyCount" | "sellCount" | "volume" | "score";
 
@@ -121,6 +128,11 @@ function applyTokenFilters(tokens: TokenState[], f: TokenFilters, sort: SortFiel
     return true;
   });
   list = list.sort((a, b) => {
+    if (sort === "createdAt") {
+      const at = new Date(a.createdAt).getTime();
+      const bt = new Date(b.createdAt).getTime();
+      return asc ? at - bt : bt - at;
+    }
     const av = (a[sort] as number) ?? 0;
     const bv = (b[sort] as number) ?? 0;
     return asc ? av - bv : bv - av;
@@ -171,7 +183,7 @@ export default function Home(): ReactElement {
   const [tokenFilters, setTokenFilters] = useState<TokenFilters>({
     minMc: "", maxMc: "", minContinue: "", minMigrate: "", maxRug: "", lifecycle: "all", search: "",
   });
-  const [tokenSort, setTokenSort] = useState<SortField>("marketCap");
+  const [tokenSort, setTokenSort] = useState<SortField>("createdAt");
   const [tokenAsc, setTokenAsc] = useState(false);
 
   // wallet table state
@@ -324,6 +336,7 @@ export default function Home(): ReactElement {
               <table style={{ borderCollapse: "collapse", fontSize: 12, width: "100%" }}>
                 <thead style={{ borderBottom: `1px solid ${C.border}` }}>
                   <tr>
+                    <Th onClick={() => toggleTokenSort("createdAt")} active={tokenSort === "createdAt"} asc={tokenAsc}>Launched</Th>
                     <Th>Token</Th>
                     <Th>Contract</Th>
                     <Th onClick={() => toggleTokenSort("marketCap")} active={tokenSort === "marketCap"} asc={tokenAsc}>MC</Th>
@@ -344,6 +357,9 @@ export default function Home(): ReactElement {
                     <tr key={token.mint} style={{ borderBottom: `1px solid ${C.border}` }}
                       onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = C.surface; }}
                       onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ""; }}>
+                      <td style={{ color: C.muted, fontSize: 11, padding: "6px 10px", whiteSpace: "nowrap" }}>
+                        {token.createdAt ? fmtAge(token.createdAt) : "—"}
+                      </td>
                       <td style={{ padding: "6px 10px", whiteSpace: "nowrap" }}>
                         <div style={{ color: "#f1f5f9", fontWeight: 600 }}>{token.name || token.symbol}</div>
                         <div style={{ color: C.muted, fontSize: 11 }}>{token.symbol}</div>
@@ -363,7 +379,7 @@ export default function Home(): ReactElement {
                     </tr>
                   ))}
                   {filteredTokens.length === 0 && (
-                    <tr><td colSpan={13} style={{ color: C.muted, padding: "24px 10px", textAlign: "center" }}>
+                    <tr><td colSpan={14} style={{ color: C.muted, padding: "24px 10px", textAlign: "center" }}>
                       {tokens.length === 0 ? "Waiting for Pump.fun events…" : "No tokens match current filters."}
                     </td></tr>
                   )}

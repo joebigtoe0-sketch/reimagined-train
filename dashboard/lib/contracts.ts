@@ -2,6 +2,7 @@ export type TokenState = {
   mint: string;
   name: string;
   symbol: string;
+  createdAt: string;
   marketCap: number;
   athMarketCap?: number;
   holderCount: number;
