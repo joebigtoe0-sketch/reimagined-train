@@ -51,6 +51,11 @@ export class RuntimeEngine {
   start(onBroadcast: (type: string, payload: unknown) => void): void {
     if (this.ingestTimer || this.parseTimer || this.snapshotTimer) return;
 
+    console.log(`[RuntimeEngine] launch source: ${this.bitquery.available ? "BITQUERY ✓" : "HELIUS+PUMPFUN (no BITQUERY_API_KEY set)"}`);
+    if (!this.bitquery.available) {
+      console.warn("[RuntimeEngine] Set BITQUERY_API_KEY in Railway env for best launch detection.");
+    }
+
     this.ingestTimer = setInterval(() => {
       void this.ingest(onBroadcast);
     }, this.ingestIntervalMs);
@@ -123,7 +128,9 @@ export class RuntimeEngine {
       knownTokens: this.state.tokens.size,
       knownWallets: this.state.wallets.size,
       knownDevelopers: this.state.developers.size,
-      queue: this.queue.stats()
+      queue: this.queue.stats(),
+      launchSource: this.bitquery.available ? "bitquery" : "helius+pumpfun",
+      bitqueryActive: this.bitquery.available,
     };
   }
 

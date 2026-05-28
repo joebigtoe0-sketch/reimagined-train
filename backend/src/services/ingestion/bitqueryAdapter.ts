@@ -139,6 +139,8 @@ export class BitqueryAdapter {
       if (!this.initialized) {
         // First poll: seed seen mints, skip backlog.
         this.initialized = true;
+        const seedCount = updates.filter(u => u.TokenSupplyUpdate?.Currency?.MintAddress).length;
+        console.log(`[Bitquery] initialized. seeded ${seedCount} existing mints from last ~60s (skipping backlog).`);
         for (const u of updates) {
           const mint = u.TokenSupplyUpdate?.Currency?.MintAddress;
           if (mint) this.seenMints.add(mint);
@@ -161,12 +163,17 @@ export class BitqueryAdapter {
         });
       }
 
+      if (results.length > 0) {
+        console.log(`[Bitquery] ${results.length} new token(s): ${results.map(r => r.symbol).join(", ")}`);
+      }
+
       if (this.seenMints.size > 30_000) {
         this.seenMints = new Set([...this.seenMints].slice(-15_000));
       }
 
       return results;
-    } catch {
+    } catch (err) {
+      console.error("[Bitquery] pollNewLaunches error:", err instanceof Error ? err.message : err);
       return [];
     }
   }
@@ -242,9 +249,15 @@ export class BitqueryAdapter {
       body: JSON.stringify({ query: queryStr, variables }),
       signal: AbortSignal.timeout(10_000)
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.error(`[Bitquery] HTTP ${res.status} ${res.statusText}`);
+      return null;
+    }
     const json = await res.json() as { data?: T; errors?: unknown[] };
-    if (json.errors) return null;
+    if (json.errors) {
+      console.error("[Bitquery] GraphQL errors:", JSON.stringify(json.errors).slice(0, 200));
+      return null;
+    }
     return json.data ?? null;
   }
 }

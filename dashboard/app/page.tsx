@@ -119,6 +119,7 @@ function CopyCell({ value }: { value: string }): ReactElement {
 interface CoverageSnapshot {
   trackedMints: number; knownWallets: number; knownTokens: number;
   signaturesSeen: number; lastEventCount: number; lastPollAt?: string;
+  launchSource?: string; bitqueryActive?: boolean;
 }
 
 // ─── Clock hook ─────────────────────────────────────────────────────────────
@@ -154,7 +155,11 @@ function Header({ search, setSearch, coverage, wsConnected }: {
         <span className="kbd">/</span>
       </div>
       <div className="hdr-stats">
-        <span className="hdr-stat">Pump.fun <b>mainnet</b></span>
+        <span className="hdr-stat">
+          source <b style={{ color: coverage?.bitqueryActive ? "var(--green)" : "var(--amber)" }}>
+            {coverage?.launchSource ?? "helius+pumpfun"}
+          </b>
+        </span>
       </div>
       <div className="hdr-clock">{fmtClock(now)}</div>
     </header>
