@@ -14,8 +14,12 @@
 
 import { env } from "../../config/env.js";
 
-// The Pump.fun global state account — ONLY CreateToken txns appear here.
+// Pump.fun program — every token creation goes through this (filter type=CREATE).
+export const PUMP_FUN_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+// Pump.fun global state account — co-signer on CreateToken txns (supplemental).
 export const PUMP_FUN_GLOBAL = "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM";
+
+const LAUNCH_ADDRESSES = [PUMP_FUN_PROGRAM, PUMP_FUN_GLOBAL];
 
 const HELIUS_REST = "https://api.helius.xyz/v0";
 const PUMP_COIN_API = "https://frontend-api.pump.fun/coins";
@@ -60,51 +64,58 @@ function extractMintFromTx(tx: HeliusTx): string | null {
 
 export class PumpFunAdapter {
   private seenMints = new Set<string>();
-  private highWaterMark: string | null = null;
-  private initialized = false;
+  // Per-address high-water marks and init flags.
+  private highWaterMarks = new Map<string, string>();
+  private initializedAddresses = new Set<string>();
 
   async pollNewLaunches(): Promise<PumpFunToken[]> {
     if (!env.HELIUS_API_KEY) return [];
 
-    // Step 1: Get recent transactions on the Pump.fun global account via Helius.
-    const txns = await this.fetchGlobalAccountTxns();
-    if (txns.length === 0) return [];
-
-    // Step 2: First poll — set watermark, skip backlog.
-    if (!this.initialized) {
-      this.initialized = true;
-      this.highWaterMark = txns[0]?.signature ?? null;
-      for (const tx of txns) {
-        const mint = extractMintFromTx(tx);
-        if (mint) this.seenMints.add(mint);
-      }
-      return [];
-    }
-
-    // Step 3: Find only txns newer than our watermark (Helius is newest-first).
-    const waterMarkIdx = this.highWaterMark
-      ? txns.findIndex((tx) => tx.signature === this.highWaterMark)
-      : -1;
-    const freshTxns = waterMarkIdx > 0
-      ? txns.slice(0, waterMarkIdx)
-      : waterMarkIdx === -1
-      ? txns       // entire page is new (rapid-fire launches)
-      : [];        // nothing new yet
-
-    // Advance watermark.
-    if (txns[0]?.signature) this.highWaterMark = txns[0].signature;
-
-    // Step 4: Extract mint addresses from fresh txns.
     const newMints: Array<{ mint: string; tx: HeliusTx }> = [];
-    for (const tx of freshTxns) {
-      const mint = extractMintFromTx(tx);
-      if (!mint || this.seenMints.has(mint)) continue;
-      this.seenMints.add(mint);
-      newMints.push({ mint, tx });
+
+    // Poll BOTH the program address (with type=CREATE) and the global state account.
+    // Using both maximises coverage — some launches only appear in one source.
+    for (const address of LAUNCH_ADDRESSES) {
+      const txns = await this.fetchAddressTxns(address);
+      if (txns.length === 0) continue;
+
+      if (!this.initializedAddresses.has(address)) {
+        // First poll for this address: set watermark, seed seen mints, skip batch.
+        this.initializedAddresses.add(address);
+        this.highWaterMarks.set(address, txns[0]?.signature ?? "");
+        for (const tx of txns) {
+          const mint = extractMintFromTx(tx);
+          if (mint) this.seenMints.add(mint);
+        }
+        continue;
+      }
+
+      const waterMark = this.highWaterMarks.get(address) ?? "";
+      const waterMarkIdx = waterMark
+        ? txns.findIndex((tx) => tx.signature === waterMark)
+        : -1;
+
+      // waterMarkIdx  0 → only those N items are new
+      // waterMarkIdx -1 → entire page is new (many launches while backend was busy)
+      // waterMarkIdx  0 → nothing new yet
+      const freshTxns = waterMarkIdx > 0
+        ? txns.slice(0, waterMarkIdx)
+        : waterMarkIdx === -1 ? txns : [];
+
+      // Advance watermark to newest signature seen.
+      if (txns[0]?.signature) this.highWaterMarks.set(address, txns[0].signature);
+
+      for (const tx of freshTxns) {
+        const mint = extractMintFromTx(tx);
+        if (!mint || this.seenMints.has(mint)) continue;
+        this.seenMints.add(mint);
+        newMints.push({ mint, tx });
+      }
     }
+
     if (newMints.length === 0) return [];
 
-    // Step 5: Enrich each new mint with name/symbol/MC from Pump.fun API.
+    // Enrich each new mint with name/symbol/MC.
     const enriched = await Promise.all(
       newMints.map(({ mint, tx }) => this.enrichMint(mint, tx))
     );
@@ -121,13 +132,18 @@ export class PumpFunAdapter {
     return this.enrichMint(mint, null);
   }
 
-  private async fetchGlobalAccountTxns(): Promise<HeliusTx[]> {
+  private async fetchAddressTxns(address: string): Promise<HeliusTx[]> {
     try {
       const params = new URLSearchParams({
         "api-key": env.HELIUS_API_KEY!,
         limit: String(env.HELIUS_SIGNATURE_LIMIT)
       });
-      const url = `${HELIUS_REST}/addresses/${PUMP_FUN_GLOBAL}/transactions?${params}`;
+      // For the main program address, filter to CREATE type only to avoid
+      // getting thousands of SWAP transactions.
+      if (address === PUMP_FUN_PROGRAM) {
+        params.set("type", "CREATE");
+      }
+      const url = `${HELIUS_REST}/addresses/${address}/transactions?${params}`;
       const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
       if (!res.ok) return [];
       const data = await res.json() as unknown;
