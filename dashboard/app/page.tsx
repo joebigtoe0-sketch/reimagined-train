@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { ReactElement } from "react";
-import type { AlertEvent, CalibrationReport, ProbabilityRecord, TokenState } from "../lib/contracts";
+import type { AlertEvent, AlertRule, CalibrationReport, ProbabilityRecord, TokenState } from "../lib/contracts";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8080";
 const WS_BASE = API_BASE.startsWith("https://")
@@ -13,24 +13,28 @@ export default function Home(): ReactElement {
   const [tokens, setTokens] = useState<TokenState[]>([]);
   const [alerts, setAlerts] = useState<AlertEvent[]>([]);
   const [probabilities, setProbabilities] = useState<ProbabilityRecord[]>([]);
-  const [report, setReport] = useState<CalibrationReport>({ sampleSize: 0, brierScore: 0, precision: 0, recall: 0 });
+  const [report, setReport] = useState<CalibrationReport>({ sampleSize: 0, brierScore: 0, precision: 0, recall: 0, driftDelta: 0 });
+  const [rules, setRules] = useState<AlertRule[]>([]);
 
   useEffect(() => {
     const load = async (): Promise<void> => {
-      const [tokenRes, alertRes, probRes, reportRes] = await Promise.all([
+      const [tokenRes, alertRes, probRes, reportRes, rulesRes] = await Promise.all([
         fetch(`${API_BASE}/api/tokens`),
         fetch(`${API_BASE}/api/alerts`),
         fetch(`${API_BASE}/api/probabilities`),
-        fetch(`${API_BASE}/api/backtest/calibration`)
+        fetch(`${API_BASE}/api/backtest/calibration`),
+        fetch(`${API_BASE}/api/alerts/rules`)
       ]);
       const tokenJson = await tokenRes.json();
       const alertJson = await alertRes.json();
       const probJson = await probRes.json();
       const reportJson = await reportRes.json();
+      const rulesJson = await rulesRes.json();
       setTokens(tokenJson.tokens);
       setAlerts(alertJson.alerts);
       setProbabilities(probJson.probabilities ?? []);
       setReport(reportJson.report);
+      setRules(rulesJson.rules ?? []);
     };
 
     void load();
@@ -81,8 +85,7 @@ export default function Home(): ReactElement {
       <h1>Pump.fun Probability MVP</h1>
       <p>Tracked tokens: {tokens.length} | High continuation setups: {strongest}</p>
       <p>
-        Backtest sample: {report.sampleSize} | Brier: {report.brierScore} | Precision: {report.precision} | Recall:{" "}
-        {report.recall}
+        Backtest sample: {report.sampleSize} | Brier: {report.brierScore} | Precision: {report.precision} | Recall: {report.recall} | Drift: {report.driftDelta}
       </p>
       <div className="grid">
         <section className="card">
@@ -133,6 +136,12 @@ export default function Home(): ReactElement {
           {probabilities.slice(0, 6).map((row) => (
             <p key={`${row.mint}-${row.timestamp}`}>
               {row.mint.slice(0, 6)} C:{row.continuation}% M:{row.migration}% R:{row.rug}%
+            </p>
+          ))}
+          <h3>Alert Rules</h3>
+          {rules.slice(0, 6).map((rule) => (
+            <p key={rule.id}>
+              {rule.enabled ? "ON" : "OFF"} {rule.name} ({rule.severity}) cd:{rule.cooldownSeconds}s
             </p>
           ))}
         </aside>

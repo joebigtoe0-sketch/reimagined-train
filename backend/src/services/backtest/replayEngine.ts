@@ -27,5 +27,17 @@ export function replayTokenTimeline(events: CanonicalEvent[], token: TokenState)
     });
   }
 
-  return timeline;
+  if (timeline.length === 0) {
+    return [
+      {
+        ts: token.createdAt,
+        mint: token.mint,
+        marketCap: token.marketCap,
+        holderCount: token.holderCount,
+        continuation: token.probabilityContinuation
+      }
+    ];
+  }
+
+  return timeline.sort((a, b) => a.ts.localeCompare(b.ts));
 }

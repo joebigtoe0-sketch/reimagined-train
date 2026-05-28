@@ -37,6 +37,8 @@ export function updateWalletProfile(existing: WalletProfile | undefined, event: 
       if (tradeReturn > 1.2) base.winRate = Math.min(99, base.winRate + 1.3);
       else base.winRate = Math.max(1, base.winRate - 1.2);
       base.realizedPnl += (tradeReturn - 1) * 100;
+      // Penalize panic exits below recent entry context.
+      if (event.marketCap < base.avgEntryMc * 0.85) base.confidence = Math.max(1, base.confidence - 2.2);
     }
   }
 
@@ -47,6 +49,10 @@ export function updateWalletProfile(existing: WalletProfile | undefined, event: 
   if (event.type === "funding" || event.type === "transfer") {
     base.rugExposureRate = Number(Math.min(1, base.rugExposureRate + 0.005).toFixed(3));
   }
+
+  // Dynamic confidence decay + recovery; consistency boosts confidence over time.
+  const consistencyBoost = base.winRate > 58 && base.avgReturnMultiple > 1.4 ? 0.6 : -0.3;
+  base.confidence = Math.max(1, Math.min(99, base.confidence + consistencyBoost));
 
   base.avgHoldMinutes = Number((base.avgHoldMinutes * 0.98 + 0.2).toFixed(2));
   base.confidence = Number(decayConfidence(base.confidence, 1).toFixed(2));

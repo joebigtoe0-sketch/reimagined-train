@@ -35,7 +35,7 @@ export class RuntimeEngine {
   private ingestTimer: NodeJS.Timeout | null = null;
   private parseTimer: NodeJS.Timeout | null = null;
   private snapshotTimer: NodeJS.Timeout | null = null;
-  private calibration: CalibrationReport = { sampleSize: 0, brierScore: 0, precision: 0, recall: 0 };
+  private calibration: CalibrationReport = { sampleSize: 0, brierScore: 0, precision: 0, recall: 0, driftDelta: 0 };
 
   constructor(poolAvailable: boolean, private readonly redis: Redis | null, private readonly ingestIntervalMs: number, private readonly snapshotIntervalMs: number, repo: RuntimeRepo) {
     this.repo = poolAvailable ? repo : new RuntimeRepo(null);
@@ -90,8 +90,24 @@ export class RuntimeEngine {
     return this.calibration;
   }
 
+  async listAlertRules() {
+    return this.repo.listAlertRules();
+  }
+
+  async saveAlertRule(input: { id?: number; name: string; enabled: boolean; severity: "info" | "warning" | "critical"; config: Record<string, number | string | boolean>; cooldownSeconds: number }) {
+    await this.repo.upsertAlertRule(input);
+  }
+
   queueStats(): { queued: number; deadLetters: number; seenIds: number } {
     return this.queue.stats();
+  }
+
+  deadLetters(limit = 100): CanonicalEvent[] {
+    return this.queue.listDeadLetters(limit);
+  }
+
+  replayDeadLetters(limit = 50): number {
+    return this.queue.requeueDeadLetters(limit);
   }
 
   async ingestWebhookPayload(payload: unknown): Promise<number> {
@@ -166,8 +182,11 @@ export class RuntimeEngine {
         probabilityContinuation: 50,
         probabilityMigration: 35,
         probabilityRug: 20,
+        probabilityHit25kBefore10k: 40,
+        probabilityHit100kBefore25k: 25,
         probabilityHit30kBefore10k: 45,
         probabilityLocalTop: 35,
+        probabilityLocalTopWithinNMinutes: 30,
         score: 0,
         lifecycle: "new"
       };
@@ -200,6 +219,7 @@ export class RuntimeEngine {
     void this.repo.upsertDeveloper(dev);
 
     const signals = detectMarketSignals(token, [...this.state.wallets.values()].slice(0, 150));
+    void this.repo.upsertSignalObservation(token.mint, event.timestamp, signals);
     const scored = scoreToken(token, signals);
     this.state.tokens.set(scored.mint, scored);
     void this.repo.upsertToken(scored);
@@ -210,13 +230,17 @@ export class RuntimeEngine {
       continuation: scored.probabilityContinuation,
       migration: scored.probabilityMigration,
       rug: scored.probabilityRug,
+      hit25kBefore10k: scored.probabilityHit25kBefore10k,
+      hit100kBefore25k: scored.probabilityHit100kBefore25k,
       hit30kBefore10k: scored.probabilityHit30kBefore10k,
       localTop: scored.probabilityLocalTop,
+      localTopWithinNMinutes: scored.probabilityLocalTopWithinNMinutes,
       score: scored.score
     };
     this.state.probabilities.unshift(probability);
     if (this.state.probabilities.length > 5000) this.state.probabilities.length = 5000;
     void this.repo.insertProbability(probability);
+    void this.repo.upsertTokenOutcome(scored.mint, scored.marketCap, scored.lifecycle);
 
     const graph = buildWalletGraph(this.state.events.slice(0, 1200));
     const clusterRisk = scoreClusterRisk(graph);

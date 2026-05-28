@@ -28,8 +28,11 @@ export interface TokenState {
   probabilityContinuation: number;
   probabilityMigration: number;
   probabilityRug: number;
+  probabilityHit25kBefore10k: number;
+  probabilityHit100kBefore25k: number;
   probabilityHit30kBefore10k: number;
   probabilityLocalTop: number;
+  probabilityLocalTopWithinNMinutes: number;
   score: number;
   lifecycle: "new" | "accumulation" | "distribution" | "failed" | "migrated";
 }
@@ -92,7 +95,20 @@ export interface ProbabilityRecord {
   continuation: number;
   migration: number;
   rug: number;
+  hit25kBefore10k: number;
+  hit100kBefore25k: number;
   hit30kBefore10k: number;
   localTop: number;
+  localTopWithinNMinutes: number;
   score: number;
+}
+
+export interface AlertRule {
+  id: number;
+  name: string;
+  enabled: boolean;
+  severity: "info" | "warning" | "critical";
+  config: Record<string, number | string | boolean>;
+  cooldownSeconds: number;
+  updatedAt: string;
 }

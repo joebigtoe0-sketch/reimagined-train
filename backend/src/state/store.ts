@@ -58,8 +58,11 @@ export function launchToken(): TokenState {
     probabilityContinuation: 50,
     probabilityMigration: 30,
     probabilityRug: 25,
+    probabilityHit25kBefore10k: 40,
+    probabilityHit100kBefore25k: 25,
     probabilityHit30kBefore10k: 45,
     probabilityLocalTop: 35,
+    probabilityLocalTopWithinNMinutes: 30,
     score: 0,
     lifecycle: "new"
   };

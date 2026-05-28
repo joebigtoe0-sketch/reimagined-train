@@ -28,8 +28,11 @@ export function scoreToken(token: TokenState, signals?: MarketSignals): TokenSta
   const continuation = clamp(Math.round(normalized * 100), 1, 99);
   const migration = clamp(Math.round((normalized * 0.8 + token.devScore / 500) * 100), 1, 99);
   const rug = clamp(Math.round((1 - normalized + token.insiderConcentration * 0.5) * 100), 1, 99);
+  const hit25kBefore10k = clamp(Math.round((normalized * 0.82 + Math.min(1, token.marketCap / 25_000) * 0.18) * 100), 1, 99);
+  const hit100kBefore25k = clamp(Math.round((normalized * 0.6 + Math.min(1, token.marketCap / 100_000) * 0.4) * 100), 1, 99);
   const hit30kBefore10k = clamp(Math.round((normalized * 0.75 + Math.min(1, token.marketCap / 30_000) * 0.25) * 100), 1, 99);
   const localTop = clamp(Math.round((1 - normalized * 0.7 + (token.marketCap / Math.max(1, token.athMarketCap)) * 0.3) * 100), 1, 99);
+  const localTopWithinNMinutes = clamp(Math.round(localTop * 0.7 + rug * 0.3), 1, 99);
   const lifecycle: TokenState["lifecycle"] =
     continuation > 62 && rug < 40 ? "accumulation" : localTop > 68 ? "distribution" : migration > 72 ? "migrated" : rug > 70 ? "failed" : "new";
 
@@ -39,8 +42,11 @@ export function scoreToken(token: TokenState, signals?: MarketSignals): TokenSta
     probabilityContinuation: continuation,
     probabilityMigration: migration,
     probabilityRug: rug,
+    probabilityHit25kBefore10k: hit25kBefore10k,
+    probabilityHit100kBefore25k: hit100kBefore25k,
     probabilityHit30kBefore10k: hit30kBefore10k,
     probabilityLocalTop: localTop,
+    probabilityLocalTopWithinNMinutes: localTopWithinNMinutes,
     lifecycle
   };
 }

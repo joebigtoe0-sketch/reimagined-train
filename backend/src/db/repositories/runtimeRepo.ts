@@ -1,6 +1,6 @@
-import type { AlertEvent, CanonicalEvent, DeveloperProfile, ProbabilityRecord, TokenState, WalletProfile } from "../../types.js";
+import type { AlertEvent, AlertRule, CanonicalEvent, DeveloperProfile, ProbabilityRecord, TokenState, WalletProfile } from "../../types.js";
 type QueryablePool = {
-  query: (text: string, values?: unknown[]) => Promise<unknown>;
+  query: (text: string, values?: unknown[]) => Promise<{ rows: unknown[] }>;
 };
 
 export class RuntimeRepo {
@@ -106,9 +106,39 @@ export class RuntimeRepo {
   async insertProbability(record: ProbabilityRecord): Promise<void> {
     if (!this.pool) return;
     await this.pool.query(
-      `INSERT INTO probability_history (mint, ts, continuation, migration, rug, hit30k_before10k, local_top, score)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-      [record.mint, record.timestamp, record.continuation, record.migration, record.rug, record.hit30kBefore10k, record.localTop, record.score]
+      `INSERT INTO probability_history (mint, ts, continuation, migration, rug, hit25k_before10k, hit100k_before25k, hit30k_before10k, local_top, local_top_within_n_minutes, score)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [
+        record.mint,
+        record.timestamp,
+        record.continuation,
+        record.migration,
+        record.rug,
+        record.hit25kBefore10k,
+        record.hit100kBefore25k,
+        record.hit30kBefore10k,
+        record.localTop,
+        record.localTopWithinNMinutes,
+        record.score
+      ]
+    );
+  }
+
+  async upsertTokenOutcome(mint: string, currentMc: number, lifecycle: string): Promise<void> {
+    if (!this.pool) return;
+    const reached25k = currentMc >= 25_000;
+    const reached100k = currentMc >= 100_000;
+    const migrated = lifecycle === "migrated";
+    const rugged = lifecycle === "failed";
+    await this.pool.query(
+      `INSERT INTO token_outcomes (mint, reached_25k, reached_100k, migrated, rugged, evaluated_at)
+       VALUES ($1,$2,$3,$4,$5,now())
+       ON CONFLICT (mint) DO UPDATE SET reached_25k = token_outcomes.reached_25k OR EXCLUDED.reached_25k,
+         reached_100k = token_outcomes.reached_100k OR EXCLUDED.reached_100k,
+         migrated = token_outcomes.migrated OR EXCLUDED.migrated,
+         rugged = token_outcomes.rugged OR EXCLUDED.rugged,
+         evaluated_at = now()`,
+      [mint, reached25k, reached100k, migrated, rugged]
     );
   }
 
@@ -131,5 +161,67 @@ export class RuntimeRepo {
        ON CONFLICT (worker_name) DO UPDATE SET checkpoint_value=EXCLUDED.checkpoint_value, updated_at=now()`,
       [workerName, value]
     );
+  }
+
+  async upsertSignalObservation(
+    mint: string,
+    timestamp: string,
+    signal: { accumulationStrength: number; distributionRisk: number; holderGrowthQuality: number; insiderRisk: number; smartWalletConviction: number }
+  ): Promise<void> {
+    if (!this.pool) return;
+    await this.pool.query(
+      `INSERT INTO signal_observations (mint, ts, accumulation_strength, distribution_risk, holder_growth_quality, insider_risk, smart_wallet_conviction)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [mint, timestamp, signal.accumulationStrength, signal.distributionRisk, signal.holderGrowthQuality, signal.insiderRisk, signal.smartWalletConviction]
+    );
+  }
+
+  async listAlertRules(): Promise<AlertRule[]> {
+    const rows = await this.rawQuery<{
+      id: number;
+      name: string;
+      enabled: boolean;
+      severity: "info" | "warning" | "critical";
+      config: Record<string, number | string | boolean>;
+      cooldown_seconds: number;
+      updated_at: string;
+    }>(
+      `SELECT id, name, enabled, severity, config, cooldown_seconds, updated_at
+       FROM alert_rules ORDER BY id ASC`
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      enabled: r.enabled,
+      severity: r.severity,
+      config: r.config ?? {},
+      cooldownSeconds: r.cooldown_seconds,
+      updatedAt: r.updated_at
+    }));
+  }
+
+  async upsertAlertRule(input: Omit<AlertRule, "id" | "updatedAt"> & { id?: number }): Promise<void> {
+    if (!this.pool) return;
+    if (input.id) {
+      await this.pool.query(
+        `UPDATE alert_rules
+         SET name=$2, enabled=$3, severity=$4, config=$5, cooldown_seconds=$6, updated_at=now()
+         WHERE id=$1`,
+        [input.id, input.name, input.enabled, input.severity, JSON.stringify(input.config), input.cooldownSeconds]
+      );
+      return;
+    }
+    await this.pool.query(
+      `INSERT INTO alert_rules (name, enabled, severity, config, cooldown_seconds)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (name) DO UPDATE SET enabled=EXCLUDED.enabled, severity=EXCLUDED.severity, config=EXCLUDED.config, cooldown_seconds=EXCLUDED.cooldown_seconds, updated_at=now()`,
+      [input.name, input.enabled, input.severity, JSON.stringify(input.config), input.cooldownSeconds]
+    );
+  }
+
+  async rawQuery<T = unknown>(text: string, values?: unknown[]): Promise<T[]> {
+    if (!this.pool) return [];
+    const result = await this.pool.query(text, values);
+    return result.rows as T[];
   }
 }

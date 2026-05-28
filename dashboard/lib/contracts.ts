@@ -39,4 +39,15 @@ export type CalibrationReport = {
   brierScore: number;
   precision: number;
   recall: number;
+  driftDelta: number;
+};
+
+export type AlertRule = {
+  id: number;
+  name: string;
+  enabled: boolean;
+  severity: "info" | "warning" | "critical";
+  config: Record<string, number | string | boolean>;
+  cooldownSeconds: number;
+  updatedAt: string;
 };

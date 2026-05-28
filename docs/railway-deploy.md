@@ -68,3 +68,20 @@ Backend:
 Dashboard:
 - opens and loads token data
 - websocket updates stream live from backend
+
+## 8) Safe rollout and rollback
+
+- Deploy order:
+  1. backend (migrations run at startup)
+  2. dashboard
+- If backend fails startup:
+  - check backend logs for missing env/migration errors
+  - verify Postgres connectivity and schema presence
+- Rollback:
+  - in Railway deployment history, rollback backend to previous healthy deployment
+  - keep dashboard pinned to previous `NEXT_PUBLIC_API_BASE` if backend domain changed
+- Post-deploy smoke checks:
+  - `/health`
+  - `/api/ops/metrics`
+  - `/api/ops/deadletters`
+  - `/api/tokens`

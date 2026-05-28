@@ -17,4 +17,5 @@ export interface CalibrationReport {
   brierScore: number;
   precision: number;
   recall: number;
+  driftDelta: number;
 }

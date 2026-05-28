@@ -194,3 +194,14 @@ If Timescale extension is missing, schema steps for hypertables will fail.
 - 401 on webhook:
   - `x-helius-secret` does not match `HELIUS_WEBHOOK_SECRET`
 
+## 12) Operations checklist
+
+- Monitor:
+  - `GET /api/ops/metrics`
+  - `GET /api/ops/deadletters`
+- If dead letters accumulate:
+  - replay with `POST /api/ops/deadletters/replay`
+- Before major deploys:
+  - confirm schema is applied
+  - verify backend env and Redis/Postgres health
+

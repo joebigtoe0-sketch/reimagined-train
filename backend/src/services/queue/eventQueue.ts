@@ -22,6 +22,16 @@ export class EventQueue {
     if (this.deadLetters.length > 500) this.deadLetters.length = 500;
   }
 
+  listDeadLetters(limit = 100): CanonicalEvent[] {
+    return this.deadLetters.slice(0, limit);
+  }
+
+  requeueDeadLetters(limit = 50): number {
+    const moved = this.deadLetters.splice(0, limit);
+    this.queue.unshift(...moved);
+    return moved.length;
+  }
+
   stats(): { queued: number; deadLetters: number; seenIds: number } {
     return { queued: this.queue.length, deadLetters: this.deadLetters.length, seenIds: this.seen.size };
   }

@@ -7,6 +7,9 @@ import { RuntimeRepo } from "./db/repositories/runtimeRepo.js";
 import { getDbPool } from "./db/client.js";
 import { RuntimeEngine } from "./workers/runtimeEngine.js";
 import { getMetrics } from "./services/observability/metrics.js";
+import { assertRequiredTables, runStartupMigrations } from "./db/migrate.js";
+import { evaluateAlerts } from "./services/alerts/alertsEngine.js";
+import type { TokenState } from "./types.js";
 
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
@@ -15,7 +18,23 @@ await app.register(websocket);
 let dbPoolAvailable = true;
 let repo: RuntimeRepo;
 try {
+  await runStartupMigrations();
   repo = new RuntimeRepo(getDbPool());
+  await assertRequiredTables(repo);
+  await repo.upsertAlertRule({
+    name: "continuation_drop",
+    enabled: true,
+    severity: "critical",
+    config: { continuationFloor: 38 },
+    cooldownSeconds: 60
+  });
+  await repo.upsertAlertRule({
+    name: "insider_risk",
+    enabled: true,
+    severity: "warning",
+    config: { insiderThreshold: 0.35 },
+    cooldownSeconds: 90
+  });
 } catch {
   dbPoolAvailable = false;
   app.log.warn("Database unavailable, running in degraded mode");
@@ -43,6 +62,37 @@ app.get("/api/probabilities", async () => ({ probabilities: engine.listProbabili
 app.get("/api/backtest/calibration", async () => ({ report: engine.calibrationReport() }));
 app.get("/api/backtest/replay", async () => ({ replay: engine.listReplay() }));
 app.get("/api/ops/metrics", async () => ({ metrics: getMetrics(), queue: engine.queueStats() }));
+app.get("/api/ops/deadletters", async () => ({ deadLetters: engine.deadLetters(100) }));
+app.post("/api/ops/deadletters/replay", async (request) => {
+  const body = (request.body ?? {}) as { limit?: number };
+  const limit = Math.max(1, Math.min(500, body.limit ?? 50));
+  const replayed = engine.replayDeadLetters(limit);
+  return { ok: true, replayed };
+});
+app.get("/api/alerts/rules", async () => ({ rules: await engine.listAlertRules() }));
+app.post("/api/alerts/rules", async (request) => {
+  const body = request.body as {
+    id?: number;
+    name: string;
+    enabled?: boolean;
+    severity: "info" | "warning" | "critical";
+    config?: Record<string, number | string | boolean>;
+    cooldownSeconds?: number;
+  };
+  await engine.saveAlertRule({
+    id: body.id,
+    name: body.name,
+    enabled: body.enabled ?? true,
+    severity: body.severity,
+    config: body.config ?? {},
+    cooldownSeconds: body.cooldownSeconds ?? 60
+  });
+  return { ok: true };
+});
+app.post("/api/alerts/simulate", async (request) => {
+  const body = request.body as { token: TokenState };
+  return { alerts: evaluateAlerts(body.token) };
+});
 app.post("/webhooks/helius", async (request, reply) => {
   const webhookSecret = env.HELIUS_WEBHOOK_SECRET;
   const incomingSecret = request.headers["x-helius-secret"];
