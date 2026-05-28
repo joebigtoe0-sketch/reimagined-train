@@ -1,138 +1,203 @@
 /**
- * Pump.fun Frontend API adapter.
+ * Pump.fun launch discovery using two complementary sources:
  *
- * Polls https://frontend-api.pump.fun/coins?sort=created_timestamp&order=DESC
- * to discover brand-new token launches with correct on-chain creation timestamps,
- * real names, symbols, creator wallet, and initial market cap.
+ * PRIMARY — Helius enhanced transactions on the Pump.fun global state account:
+ *   TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM
+ *   Every transaction on this account is a CreateToken — no filtering needed.
+ *   We extract the new mint address from tokenTransfers.
  *
- * This replaces the Helius-based launch discovery which was unreliable because:
- *  - Helius "CREATE" events don't always include the right mint
- *  - The event timestamp is the ingestion time, not the creation block time
- *  - Rate limits meant we'd miss launches during busy periods
+ * ENRICHMENT — Pump.fun per-coin REST API:
+ *   https://frontend-api.pump.fun/coins/{mint}
+ *   Gives us the real name, symbol, creation timestamp, creator wallet, and MC.
+ *   Falls back to Helius DAS getAsset if the coin endpoint is unreachable.
  */
 
-const PUMP_API = "https://frontend-api.pump.fun";
-const POLL_LIMIT = 50;
+import { env } from "../../config/env.js";
+
+// The Pump.fun global state account — ONLY CreateToken txns appear here.
+export const PUMP_FUN_GLOBAL = "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM";
+
+const HELIUS_REST = "https://api.helius.xyz/v0";
+const PUMP_COIN_API = "https://frontend-api.pump.fun/coins";
 
 export interface PumpFunToken {
   mint: string;
   name: string;
   symbol: string;
-  createdAt: string;    // ISO string from on-chain creation timestamp
+  createdAt: string;
   creatorWallet: string;
   usdMarketCap: number;
-  complete: boolean;    // true = migrated to Raydium
-  imageUri?: string;
-  description?: string;
+  complete: boolean;
 }
 
-interface PumpApiCoin {
+interface HeliusTx {
+  signature?: string;
+  timestamp?: number;
+  feePayer?: string;
+  tokenTransfers?: Array<{ mint?: string; toUserAccount?: string; fromUserAccount?: string; tokenAmount?: number }>;
+  accountData?: Array<{ account?: string }>;
+}
+
+interface PumpCoin {
   mint?: string;
   name?: string;
   symbol?: string;
-  created_timestamp?: number; // Unix seconds
+  created_timestamp?: number;
   creator?: string;
   usd_market_cap?: number;
-  market_cap?: number;
   complete?: boolean;
-  king_of_the_hill_timestamp?: number;
-  image_uri?: string;
-  description?: string;
+}
+
+/** Extract the new SPL token mint from a Pump.fun CreateToken transaction. */
+function extractMintFromTx(tx: HeliusTx): string | null {
+  // The new mint appears in tokenTransfers going TO the bonding curve.
+  for (const tt of tx.tokenTransfers ?? []) {
+    const mint = tt.mint ?? "";
+    if (mint && mint.length >= 32 && !mint.startsWith("So11")) return mint;
+  }
+  return null;
 }
 
 export class PumpFunAdapter {
-  // Track which mints we've already ingested so we don't re-process them.
   private seenMints = new Set<string>();
-  // High-water mark: newest creation timestamp we've processed (Unix ms).
-  private newestSeenTs = 0;
+  private highWaterMark: string | null = null;
   private initialized = false;
 
-  /**
-   * Poll for new launches. Returns only tokens launched after the last poll.
-   * First call sets the high-water mark and returns nothing (skips backlog).
-   */
   async pollNewLaunches(): Promise<PumpFunToken[]> {
+    if (!env.HELIUS_API_KEY) return [];
+
+    // Step 1: Get recent transactions on the Pump.fun global account via Helius.
+    const txns = await this.fetchGlobalAccountTxns();
+    if (txns.length === 0) return [];
+
+    // Step 2: First poll — set watermark, skip backlog.
+    if (!this.initialized) {
+      this.initialized = true;
+      this.highWaterMark = txns[0]?.signature ?? null;
+      for (const tx of txns) {
+        const mint = extractMintFromTx(tx);
+        if (mint) this.seenMints.add(mint);
+      }
+      return [];
+    }
+
+    // Step 3: Find only txns newer than our watermark (Helius is newest-first).
+    const waterMarkIdx = this.highWaterMark
+      ? txns.findIndex((tx) => tx.signature === this.highWaterMark)
+      : -1;
+    const freshTxns = waterMarkIdx > 0
+      ? txns.slice(0, waterMarkIdx)
+      : waterMarkIdx === -1
+      ? txns       // entire page is new (rapid-fire launches)
+      : [];        // nothing new yet
+
+    // Advance watermark.
+    if (txns[0]?.signature) this.highWaterMark = txns[0].signature;
+
+    // Step 4: Extract mint addresses from fresh txns.
+    const newMints: Array<{ mint: string; tx: HeliusTx }> = [];
+    for (const tx of freshTxns) {
+      const mint = extractMintFromTx(tx);
+      if (!mint || this.seenMints.has(mint)) continue;
+      this.seenMints.add(mint);
+      newMints.push({ mint, tx });
+    }
+    if (newMints.length === 0) return [];
+
+    // Step 5: Enrich each new mint with name/symbol/MC from Pump.fun API.
+    const enriched = await Promise.all(
+      newMints.map(({ mint, tx }) => this.enrichMint(mint, tx))
+    );
+
+    if (this.seenMints.size > 20_000) {
+      this.seenMints = new Set([...this.seenMints].slice(-10_000));
+    }
+
+    return enriched.filter((t): t is PumpFunToken => t !== null);
+  }
+
+  /** Fetch per-token details for an already-tracked mint (for MC refresh). */
+  async fetchToken(mint: string): Promise<PumpFunToken | null> {
+    return this.enrichMint(mint, null);
+  }
+
+  private async fetchGlobalAccountTxns(): Promise<HeliusTx[]> {
     try {
-      const url = `${PUMP_API}/coins?offset=0&limit=${POLL_LIMIT}&sort=created_timestamp&order=DESC&includeNsfw=false`;
-      const res = await fetch(url, {
-        headers: { "Accept": "application/json" },
-        signal: AbortSignal.timeout(8000)
+      const params = new URLSearchParams({
+        "api-key": env.HELIUS_API_KEY!,
+        limit: String(env.HELIUS_SIGNATURE_LIMIT)
       });
+      const url = `${HELIUS_REST}/addresses/${PUMP_FUN_GLOBAL}/transactions?${params}`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
       if (!res.ok) return [];
-
-      const coins = (await res.json()) as PumpApiCoin[];
-      if (!Array.isArray(coins) || coins.length === 0) return [];
-
-      if (!this.initialized) {
-        // First poll: record the newest timestamp as the watermark, return nothing.
-        this.initialized = true;
-        const newest = coins[0];
-        if (newest?.created_timestamp) {
-          this.newestSeenTs = newest.created_timestamp * 1000;
-        }
-        // Seed seen mints so we don't reprocess them later.
-        for (const c of coins) { if (c.mint) this.seenMints.add(c.mint); }
-        return [];
-      }
-
-      // Only take tokens created after our watermark and not already seen.
-      const fresh: PumpFunToken[] = [];
-      for (const coin of coins) {
-        if (!coin.mint || this.seenMints.has(coin.mint)) continue;
-        const ts = (coin.created_timestamp ?? 0) * 1000;
-        if (ts <= this.newestSeenTs) continue;
-
-        this.seenMints.add(coin.mint);
-        fresh.push(this.normalize(coin));
-      }
-
-      // Advance watermark to the newest token we saw this poll.
-      if (coins[0]?.created_timestamp) {
-        this.newestSeenTs = Math.max(this.newestSeenTs, coins[0].created_timestamp * 1000);
-      }
-
-      // Keep seen set bounded.
-      if (this.seenMints.size > 20_000) {
-        this.seenMints = new Set([...this.seenMints].slice(-10_000));
-      }
-
-      return fresh;
+      const data = await res.json() as unknown;
+      return Array.isArray(data) ? (data as HeliusTx[]) : [];
     } catch {
       return [];
     }
   }
 
-  /**
-   * Fetch current data for a specific token (MC, lifecycle).
-   */
-  async fetchToken(mint: string): Promise<PumpFunToken | null> {
+  private async enrichMint(mint: string, tx: HeliusTx | null): Promise<PumpFunToken | null> {
+    // Try Pump.fun per-coin API first.
     try {
-      const res = await fetch(`${PUMP_API}/coins/${mint}`, {
-        headers: { "Accept": "application/json" },
+      const res = await fetch(`${PUMP_COIN_API}/${mint}`, {
+        headers: { Accept: "application/json" },
         signal: AbortSignal.timeout(5000)
       });
-      if (!res.ok) return null;
-      const coin = (await res.json()) as PumpApiCoin;
-      if (!coin?.mint) return null;
-      return this.normalize(coin);
-    } catch {
-      return null;
-    }
-  }
+      if (res.ok) {
+        const coin = await res.json() as PumpCoin;
+        if (coin?.mint) {
+          return {
+            mint: coin.mint,
+            name: coin.name?.trim() || `Token ${mint.slice(0, 6)}`,
+            symbol: coin.symbol?.trim() || mint.slice(0, 6).toUpperCase(),
+            createdAt: coin.created_timestamp
+              ? new Date(coin.created_timestamp * 1000).toISOString()
+              : (tx?.timestamp ? new Date(tx.timestamp * 1000).toISOString() : new Date().toISOString()),
+            creatorWallet: coin.creator ?? tx?.feePayer ?? "",
+            usdMarketCap: coin.usd_market_cap ?? 0,
+            complete: coin.complete ?? false
+          };
+        }
+      }
+    } catch { /* fall through to DAS */ }
 
-  private normalize(coin: PumpApiCoin): PumpFunToken {
+    // Fallback: Helius DAS getAsset for name/symbol.
+    if (env.HELIUS_API_KEY) {
+      try {
+        const rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${env.HELIUS_API_KEY}`;
+        const res = await fetch(rpcUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: mint, method: "getAsset", params: { id: mint } }),
+          signal: AbortSignal.timeout(5000)
+        });
+        if (res.ok) {
+          const json = await res.json() as { result?: { content?: { metadata?: { name?: string; symbol?: string } } } };
+          const meta = json.result?.content?.metadata;
+          return {
+            mint,
+            name: meta?.name?.trim() || `Token ${mint.slice(0, 6)}`,
+            symbol: meta?.symbol?.trim() || mint.slice(0, 6).toUpperCase(),
+            createdAt: tx?.timestamp ? new Date(tx.timestamp * 1000).toISOString() : new Date().toISOString(),
+            creatorWallet: tx?.feePayer ?? "",
+            usdMarketCap: 0,
+            complete: false
+          };
+        }
+      } catch { /* give up */ }
+    }
+
+    // Last resort: build from what we have in the tx.
+    if (!mint) return null;
     return {
-      mint: coin.mint ?? "",
-      name: (coin.name ?? "").trim() || `Token ${(coin.mint ?? "").slice(0, 6)}`,
-      symbol: (coin.symbol ?? "").trim() || (coin.mint ?? "").slice(0, 6).toUpperCase(),
-      createdAt: coin.created_timestamp
-        ? new Date(coin.created_timestamp * 1000).toISOString()
-        : new Date().toISOString(),
-      creatorWallet: coin.creator ?? "",
-      usdMarketCap: coin.usd_market_cap ?? 0,
-      complete: coin.complete ?? false,
-      imageUri: coin.image_uri,
-      description: coin.description
+      mint,
+      name: `Token ${mint.slice(0, 6)}`,
+      symbol: mint.slice(0, 6).toUpperCase(),
+      createdAt: tx?.timestamp ? new Date(tx.timestamp * 1000).toISOString() : new Date().toISOString(),
+      creatorWallet: tx?.feePayer ?? "",
+      usdMarketCap: 0,
+      complete: false
     };
   }
 }
