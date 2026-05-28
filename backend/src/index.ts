@@ -35,9 +35,9 @@ try {
     config: { insiderThreshold: 0.35 },
     cooldownSeconds: 90
   });
-} catch {
+} catch (error) {
   dbPoolAvailable = false;
-  app.log.warn("Database unavailable, running in degraded mode");
+  app.log.error({ err: error }, "Database unavailable, running in degraded mode");
   repo = new RuntimeRepo(null);
 }
 

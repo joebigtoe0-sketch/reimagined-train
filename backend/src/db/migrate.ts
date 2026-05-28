@@ -9,7 +9,12 @@ const __dirname = path.dirname(__filename);
 
 export async function runStartupMigrations(): Promise<void> {
   const pool = getDbPool();
-  const schemaPath = path.join(__dirname, "schema.sql");
+  const distSchemaPath = path.join(__dirname, "schema.sql");
+  const sourceSchemaPath = path.resolve(process.cwd(), "src/db/schema.sql");
+  const schemaPath = fs.existsSync(distSchemaPath) ? distSchemaPath : sourceSchemaPath;
+  if (!fs.existsSync(schemaPath)) {
+    throw new Error(`Schema file not found at ${distSchemaPath} or ${sourceSchemaPath}`);
+  }
   const sql = fs.readFileSync(schemaPath, "utf8");
   await pool.query(sql);
 }
