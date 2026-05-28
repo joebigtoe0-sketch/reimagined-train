@@ -14,6 +14,22 @@ import { env } from "../../config/env.js";
 const ENDPOINT = "https://streaming.bitquery.io/graphql";
 const PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 
+// Pump.fun create instruction accounts: [mint, mintAuthority/global, bondingCurve, ...]
+// The mint is always AccountNames[0] === "mint", or the first writable account.
+function extractMint(ix: {
+  Accounts: Array<{ Address: string; IsWritable: boolean }>;
+  Program: { AccountNames: string[] };
+}): string | null {
+  const names = ix.Program.AccountNames ?? [];
+  const accounts = ix.Accounts ?? [];
+  // Prefer explicit name match
+  const mintIdx = names.indexOf("mint");
+  if (mintIdx >= 0 && accounts[mintIdx]?.Address) return accounts[mintIdx].Address;
+  // Fallback: first writable account (index 0 in create instruction)
+  const first = accounts.find(a => a.IsWritable);
+  return first?.Address ?? null;
+}
+
 export interface BitqueryToken {
   mint: string;
   name: string;
@@ -34,10 +50,13 @@ export interface BitqueryTrade {
 
 // ─── GraphQL queries ────────────────────────────────────────────────────────
 
+// Use Instructions query — reads name/symbol directly from on-chain tx args.
+// TokenSupplyUpdates.Currency.Name/Symbol are often empty for brand-new tokens
+// because metadata indexing has a delay. Instructions args are always immediate.
 const NEW_TOKENS_QUERY = `
 query NewPumpTokens($since: ISO8601DateTime) {
   Solana {
-    TokenSupplyUpdates(
+    Instructions(
       where: {
         Instruction: {
           Program: {
@@ -53,11 +72,20 @@ query NewPumpTokens($since: ISO8601DateTime) {
     ) {
       Block { Time }
       Transaction { Signer Signature }
-      TokenSupplyUpdate {
-        Currency {
-          Name
-          Symbol
-          MintAddress
+      Instruction {
+        Accounts {
+          Address
+          IsWritable
+        }
+        Program {
+          AccountNames
+          Arguments {
+            Name
+            Type
+            Value {
+              ... on Solana_ABI_String_Value_Arg { string }
+            }
+          }
         }
       }
     }
@@ -121,11 +149,11 @@ export class BitqueryAdapter {
       console.error("[Bitquery] BITQUERY_API_KEY is not set — launches will NOT be tracked.");
       return;
     }
-    // Simple ping: ask for a single recent token creation
+    // Simple ping: ask for the most recent Pump.fun create instruction
     const PING_QUERY = `
       query Ping {
         Solana {
-          TokenSupplyUpdates(
+          Instructions(
             where: {
               Instruction: {
                 Program: {
@@ -133,21 +161,27 @@ export class BitqueryAdapter {
                   Method: { in: ["create", "create_v2"] }
                 }
               }
+              Transaction: { Result: { Success: true } }
             }
             limit: { count: 1 }
             orderBy: { descending: Block_Time }
           ) {
             Block { Time }
-            TokenSupplyUpdate { Currency { MintAddress Symbol Name } }
+            Instruction {
+              Program {
+                Arguments { Name Value { ... on Solana_ABI_String_Value_Arg { string } } }
+              }
+            }
           }
         }
       }
     `;
-    const data = await this.query<{ Solana: { TokenSupplyUpdates: unknown[] } }>(PING_QUERY, {});
-    if (data?.Solana?.TokenSupplyUpdates != null) {
+    const data = await this.query<{ Solana: { Instructions: Array<{ Instruction: { Program: { Arguments: Array<{ Name: string; Value: { string?: string } }> } } }> } }>(PING_QUERY, {});
+    if (data?.Solana?.Instructions != null) {
       this._verified = true;
-      const sample = (data.Solana.TokenSupplyUpdates[0] as { TokenSupplyUpdate?: { Currency?: { Symbol?: string } } } | undefined)?.TokenSupplyUpdate?.Currency?.Symbol ?? "?";
-      console.log(`[Bitquery] ✓ connection verified. Last token on chain: $${sample}`);
+      const args = data.Solana.Instructions[0]?.Instruction?.Program?.Arguments ?? [];
+      const symbol = args.find(a => a.Name === "symbol")?.Value.string ?? "?";
+      console.log(`[Bitquery] ✓ connection verified. Most recent pump token: $${symbol}`);
     } else {
       console.error("[Bitquery] ✗ verification failed — key may be wrong or expired. Check Railway env var BITQUERY_API_KEY.");
       console.error("[Bitquery] Make sure you use an OAuth2 Bearer Token (NOT the V1 API key). Generate at: https://account.bitquery.io/user/api_v2/access_tokens");
@@ -163,47 +197,61 @@ export class BitqueryAdapter {
     try {
       const data = await this.query<{
         Solana: {
-          TokenSupplyUpdates: Array<{
+          Instructions: Array<{
             Block: { Time: string };
             Transaction: { Signer: string; Signature: string };
-            TokenSupplyUpdate: { Currency: { Name: string; Symbol: string; MintAddress: string } };
+            Instruction: {
+              Accounts: Array<{ Address: string; IsWritable: boolean }>;
+              Program: {
+                AccountNames: string[];
+                Arguments: Array<{
+                  Name: string;
+                  Type: string;
+                  Value: { string?: string };
+                }>;
+              };
+            };
           }>;
         };
       }>(NEW_TOKENS_QUERY, { since });
 
       this.lastLaunchPollAt = new Date();
 
-      const updates = data?.Solana?.TokenSupplyUpdates ?? [];
+      const instructions = data?.Solana?.Instructions ?? [];
 
       if (!this.initialized) {
-        // First poll: seed seen mints, skip backlog.
         this.initialized = true;
-        const seedCount = updates.filter(u => u.TokenSupplyUpdate?.Currency?.MintAddress).length;
-        console.log(`[Bitquery] initialized. seeded ${seedCount} existing mints from last ~60s (skipping backlog).`);
-        for (const u of updates) {
-          const mint = u.TokenSupplyUpdate?.Currency?.MintAddress;
-          if (mint) this.seenMints.add(mint);
+        // Seed seen mints from first-poll backlog so we don't replay them.
+        let seeded = 0;
+        for (const ix of instructions) {
+          const mint = extractMint(ix.Instruction);
+          if (mint) { this.seenMints.add(mint); seeded++; }
         }
+        console.log(`[Bitquery] initialized. seeded ${seeded} existing mints (skipping backlog).`);
         return [];
       }
 
       const results: BitqueryToken[] = [];
-      for (const u of updates) {
-        const currency = u.TokenSupplyUpdate?.Currency;
-        const mint = currency?.MintAddress;
+      for (const ix of instructions) {
+        const mint = extractMint(ix.Instruction);
         if (!mint || this.seenMints.has(mint)) continue;
         this.seenMints.add(mint);
+
+        const args = ix.Instruction.Program.Arguments ?? [];
+        const name = args.find(a => a.Name === "name")?.Value.string?.trim() ?? "";
+        const symbol = args.find(a => a.Name === "symbol")?.Value.string?.trim() ?? "";
+
         results.push({
           mint,
-          name: currency.Name?.trim() || `Token ${mint.slice(0, 6)}`,
-          symbol: currency.Symbol?.trim() || mint.slice(0, 6).toUpperCase(),
-          createdAt: u.Block?.Time ?? new Date().toISOString(),
-          devWallet: u.Transaction?.Signer ?? ""
+          name: name || `Token ${mint.slice(0, 6)}`,
+          symbol: symbol || mint.slice(0, 6).toUpperCase(),
+          createdAt: ix.Block?.Time ?? new Date().toISOString(),
+          devWallet: ix.Transaction?.Signer ?? ""
         });
       }
 
       if (results.length > 0) {
-        console.log(`[Bitquery] ${results.length} new token(s): ${results.map(r => r.symbol).join(", ")}`);
+        console.log(`[Bitquery] ${results.length} new token(s): ${results.map(r => `$${r.symbol} (${r.name})`).join(", ")}`);
       }
 
       if (this.seenMints.size > 30_000) {
