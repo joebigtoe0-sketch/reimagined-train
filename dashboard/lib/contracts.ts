@@ -52,6 +52,21 @@ export type CalibrationReport = {
   driftDelta: number;
 };
 
+export type WalletProfile = {
+  wallet: string;
+  winRate: number;
+  avgReturnMultiple: number;
+  confidence: number;
+  category: "elite_early" | "continuation" | "scalper" | "sniper" | "distribution" | "insider" | "bad" | "unknown";
+  avgEntryMc: number;
+  avgExitMc: number;
+  avgHoldMinutes: number;
+  migrationSuccessRate: number;
+  rugExposureRate: number;
+  totalTrades: number;
+  realizedPnl: number;
+};
+
 export type AlertRule = {
   id: number;
   name: string;

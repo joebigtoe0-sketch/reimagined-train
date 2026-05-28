@@ -366,4 +366,44 @@ export class RuntimeRepo {
     const rows = await this.rawQuery<{ count: string }>(`SELECT COUNT(*)::text AS count FROM raw_events`);
     return Number(rows[0]?.count ?? "0");
   }
+
+  async listWallets(limit = 500): Promise<WalletProfile[]> {
+    const rows = await this.rawQuery<{
+      wallet: string;
+      win_rate: number;
+      avg_return_multiple: number;
+      confidence: number;
+      category: string;
+      avg_entry_mc: number;
+      avg_exit_mc: number;
+      avg_hold_minutes: number;
+      migration_success_rate: number;
+      rug_exposure_rate: number;
+      total_trades: number;
+      realized_pnl: number;
+    }>(
+      `SELECT wallet, win_rate, avg_return_multiple, confidence, category,
+              avg_entry_mc, avg_exit_mc, avg_hold_minutes, migration_success_rate,
+              rug_exposure_rate, total_trades, realized_pnl
+       FROM wallet_scores
+       WHERE total_trades > 0
+       ORDER BY realized_pnl DESC
+       LIMIT $1`,
+      [limit]
+    );
+    return rows.map((r) => ({
+      wallet: r.wallet,
+      winRate: Number(r.win_rate ?? 0),
+      avgReturnMultiple: Number(r.avg_return_multiple ?? 0),
+      confidence: Number(r.confidence ?? 0),
+      category: (r.category ?? "unknown") as WalletProfile["category"],
+      avgEntryMc: Number(r.avg_entry_mc ?? 0),
+      avgExitMc: Number(r.avg_exit_mc ?? 0),
+      avgHoldMinutes: Number(r.avg_hold_minutes ?? 0),
+      migrationSuccessRate: Number(r.migration_success_rate ?? 0),
+      rugExposureRate: Number(r.rug_exposure_rate ?? 0),
+      totalTrades: Number(r.total_trades ?? 0),
+      realizedPnl: Number(r.realized_pnl ?? 0)
+    }));
+  }
 }

@@ -68,6 +68,10 @@ app.get("/api/probabilities", async () => {
   const probabilities = await repo.listProbabilities(500);
   return { probabilities: probabilities.length > 0 ? probabilities : engine.listProbabilities() };
 });
+app.get("/api/wallets", async () => {
+  const wallets = await repo.listWallets(500);
+  return { wallets };
+});
 app.get("/api/backtest/calibration", async () => ({ report: engine.calibrationReport() }));
 app.get("/api/backtest/replay", async () => ({ replay: engine.listReplay() }));
 app.get("/api/ops/metrics", async () => {
