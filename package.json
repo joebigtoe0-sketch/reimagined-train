@@ -1,0 +1,14 @@
+{
+  "name": "pumpfun-probability-mvp",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "backend",
+    "dashboard"
+  ],
+  "scripts": {
+    "dev:backend": "npm run dev -w backend",
+    "dev:dashboard": "npm run dev -w dashboard",
+    "build": "npm run build -w backend && npm run build -w dashboard"
+  }
+}
