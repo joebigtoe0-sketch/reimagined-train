@@ -16,7 +16,8 @@ const envSchema = z.object({
   HELIUS_MAX_TRACKED_WALLETS: z.coerce.number().default(3000),
   HELIUS_MAX_TRACKED_MINTS: z.coerce.number().default(5000),
   HELIUS_SIGNATURE_LIMIT: z.coerce.number().default(50),
-  HELIUS_WEBHOOK_SECRET: z.string().optional()
+  HELIUS_WEBHOOK_SECRET: z.string().optional(),
+  BITQUERY_API_KEY: z.string().optional()
 });
 
 export const env = envSchema.parse(process.env);

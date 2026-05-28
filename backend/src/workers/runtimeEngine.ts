@@ -11,6 +11,7 @@ import { scoreClusterRisk } from "../services/graph/clusterRisk.js";
 import { HeliusAdapter } from "../services/ingestion/heliusAdapter.js";
 import { PumpFunAdapter } from "../services/ingestion/pumpFunAdapter.js";
 import { DexScreenerAdapter } from "../services/ingestion/dexScreenerAdapter.js";
+import { BitqueryAdapter } from "../services/ingestion/bitqueryAdapter.js";
 import { enqueueMeta } from "../services/ingestion/tokenMetadata.js";
 import { updateDeveloperProfile } from "../services/intelligence/developerIntelligence.js";
 import { updateWalletProfile } from "../services/intelligence/walletIntelligence.js";
@@ -36,6 +37,7 @@ export class RuntimeEngine {
   private readonly heliusAdapter = new HeliusAdapter();
   private readonly pumpFunAdapter = new PumpFunAdapter();
   private readonly dexScreener = new DexScreenerAdapter();
+  private readonly bitquery = new BitqueryAdapter();
   private readonly repo: RuntimeRepo;
   private ingestTimer: NodeJS.Timeout | null = null;
   private parseTimer: NodeJS.Timeout | null = null;
@@ -152,8 +154,18 @@ export class RuntimeEngine {
   private async ingest(onBroadcast: (type: string, payload: unknown) => void): Promise<void> {
     const start = Date.now();
 
-    // ── Step 1: Pump.fun API → discover genuinely new launches ──────────────
-    const newTokens = await this.pumpFunAdapter.pollNewLaunches();
+    // ── Step 1: Discover new launches ───────────────────────────────────────
+    // Use Bitquery if API key is configured (best coverage, exact timestamps).
+    // Fall back to Pump.fun / Helius-based detection otherwise.
+    const newTokens = this.bitquery.available
+      ? await this.bitquery.pollNewLaunches().then((bqTokens) =>
+          bqTokens.map((t) => ({
+            mint: t.mint, name: t.name, symbol: t.symbol,
+            createdAt: t.createdAt, creatorWallet: t.devWallet,
+            usdMarketCap: 0, complete: false
+          }))
+        )
+      : await this.pumpFunAdapter.pollNewLaunches();
     for (const pt of newTokens) {
       // Register the mint for Helius trade tracking.
       this.heliusAdapter.addDiscoveredMint(pt.mint);
@@ -191,7 +203,27 @@ export class RuntimeEngine {
       }
     }
 
-    // ── Step 2: Helius → SWAP/trade events for already-tracked mints ────────
+    // ── Step 2: Trade events for tracked mints ───────────────────────────────
+    // Primary: Bitquery trade stream (when key available).
+    // Supplement/fallback: Helius SWAP polling.
+    const trackedMintsList = [...this.state.tokens.keys()];
+    if (this.bitquery.available && trackedMintsList.length > 0) {
+      const bqTrades = await this.bitquery.pollTrades(trackedMintsList);
+      const bqEvents: CanonicalEvent[] = bqTrades.map((t) => ({
+        id: `bq-trade:${t.signature}:${t.traderWallet}`,
+        source: "helius" as const,
+        type: "trade" as const,
+        mint: t.mint,
+        wallet: t.traderWallet,
+        timestamp: t.timestamp,
+        signature: t.signature,
+        amountSol: t.amountSol,
+        marketCap: 0,
+        side: t.side,
+        participants: [t.traderWallet]
+      }));
+      if (bqEvents.length > 0) await this.queueAdapter.publish(bqEvents);
+    }
     const rawEvents = await this.heliusAdapter.poll();
     if (rawEvents.length > 0) this.fanoutDiscovery(rawEvents);
     const tradeEvents = rawEvents.map(normalizeHeliusEvent);
