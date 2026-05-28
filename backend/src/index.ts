@@ -152,7 +152,11 @@ app.get("/ws", { websocket: true }, async (connection) => {
 function broadcast(type: string, payload: unknown): void {
   const event = JSON.stringify({ type, payload, timestamp: new Date().toISOString() });
   for (const client of wsClients) {
-    if (client.readyState === 1) client.send(event);
+    try {
+      if (client?.readyState === 1) client.send(event);
+    } catch {
+      wsClients.delete(client);
+    }
   }
 }
 

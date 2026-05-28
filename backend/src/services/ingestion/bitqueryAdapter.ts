@@ -54,7 +54,7 @@ export interface BitqueryTrade {
 // TokenSupplyUpdates.Currency.Name/Symbol are often empty for brand-new tokens
 // because metadata indexing has a delay. Instructions args are always immediate.
 const NEW_TOKENS_QUERY = `
-query NewPumpTokens($since: ISO8601DateTime) {
+query NewPumpTokens($since: DateTime) {
   Solana {
     Instructions(
       where: {
@@ -94,7 +94,7 @@ query NewPumpTokens($since: ISO8601DateTime) {
 `;
 
 const RECENT_TRADES_QUERY = `
-query PumpTrades($since: ISO8601DateTime, $mints: [String!]) {
+query PumpTrades($since: DateTime, $mints: [String!]) {
   Solana {
     DEXTrades(
       where: {
