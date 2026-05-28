@@ -72,6 +72,9 @@ export interface CanonicalEvent {
   marketCap: number;
   amountSol: number;
   side?: TradeSide;
+  participants?: string[];
+  mints?: string[];
+  devWallet?: string;
   metadata?: Record<string, string | number | boolean>;
 }
 

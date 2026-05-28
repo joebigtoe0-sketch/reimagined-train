@@ -9,35 +9,53 @@ const WS_BASE = API_BASE.startsWith("https://")
   ? API_BASE.replace("https://", "wss://")
   : API_BASE.replace("http://", "ws://");
 
+interface CoverageSnapshot {
+  trackedWallets: number;
+  trackedMints: number;
+  globalAddresses: number;
+  signaturesSeen: number;
+  knownTokens: number;
+  knownWallets: number;
+  knownDevelopers: number;
+  lastPollAt?: string;
+  lastEventCount: number;
+  queue?: { queued: number; deadLetters: number; seenIds: number };
+}
+
 export default function Home(): ReactElement {
   const [tokens, setTokens] = useState<TokenState[]>([]);
   const [alerts, setAlerts] = useState<AlertEvent[]>([]);
   const [probabilities, setProbabilities] = useState<ProbabilityRecord[]>([]);
   const [report, setReport] = useState<CalibrationReport>({ sampleSize: 0, brierScore: 0, precision: 0, recall: 0, driftDelta: 0 });
   const [rules, setRules] = useState<AlertRule[]>([]);
+  const [coverage, setCoverage] = useState<CoverageSnapshot | null>(null);
 
   useEffect(() => {
     const load = async (): Promise<void> => {
-      const [tokenRes, alertRes, probRes, reportRes, rulesRes] = await Promise.all([
+      const [tokenRes, alertRes, probRes, reportRes, rulesRes, coverageRes] = await Promise.all([
         fetch(`${API_BASE}/api/tokens`),
         fetch(`${API_BASE}/api/alerts`),
         fetch(`${API_BASE}/api/probabilities`),
         fetch(`${API_BASE}/api/backtest/calibration`),
-        fetch(`${API_BASE}/api/alerts/rules`)
+        fetch(`${API_BASE}/api/alerts/rules`),
+        fetch(`${API_BASE}/api/ops/coverage`)
       ]);
       const tokenJson = await tokenRes.json();
       const alertJson = await alertRes.json();
       const probJson = await probRes.json();
       const reportJson = await reportRes.json();
       const rulesJson = await rulesRes.json();
+      const coverageJson = await coverageRes.json();
       setTokens(tokenJson.tokens);
       setAlerts(alertJson.alerts);
       setProbabilities(probJson.probabilities ?? []);
       setReport(reportJson.report);
       setRules(rulesJson.rules ?? []);
+      setCoverage(coverageJson.coverage ?? null);
     };
 
     void load();
+    const refresh = setInterval(() => void load(), 8000);
 
     const ws = new WebSocket(`${WS_BASE}/ws`);
     ws.onmessage = (event) => {
@@ -72,7 +90,10 @@ export default function Home(): ReactElement {
       }
     };
 
-    return () => ws.close();
+    return () => {
+      clearInterval(refresh);
+      ws.close();
+    };
   }, []);
 
   const strongest = useMemo(
@@ -87,6 +108,12 @@ export default function Home(): ReactElement {
       <p>
         Backtest sample: {report.sampleSize} | Brier: {report.brierScore} | Precision: {report.precision} | Recall: {report.recall} | Drift: {report.driftDelta}
       </p>
+      {coverage && (
+        <p>
+          Coverage: tokens {coverage.knownTokens} | wallets {coverage.knownWallets} | devs {coverage.knownDevelopers} | tracked mints {coverage.trackedMints} | tracked wallets {coverage.trackedWallets} | program addrs {coverage.globalAddresses} | sigs seen {coverage.signaturesSeen}
+          {coverage.lastPollAt ? ` | last poll ${new Date(coverage.lastPollAt).toLocaleTimeString()} (+${coverage.lastEventCount})` : ""}
+        </p>
+      )}
       <div className="grid">
         <section className="card">
           <h2>Live Tokens</h2>

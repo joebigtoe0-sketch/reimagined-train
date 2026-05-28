@@ -10,11 +10,14 @@ export interface HeliusRawEvent {
   side?: TradeSide;
   amountSol?: number;
   marketCap?: number;
+  participants?: string[];
+  mints?: string[];
+  devWallet?: string;
 }
 
 export function normalizeHeliusEvent(raw: HeliusRawEvent): CanonicalEvent {
   return {
-    id: `${raw.signature}:${raw.type}:${raw.wallet}`,
+    id: `${raw.signature}:${raw.type}:${raw.wallet}:${raw.mint}`,
     source: "helius",
     type: raw.type,
     mint: raw.mint,
@@ -24,6 +27,9 @@ export function normalizeHeliusEvent(raw: HeliusRawEvent): CanonicalEvent {
     amountSol: raw.amountSol ?? 0,
     marketCap: raw.marketCap ?? 0,
     side: raw.side,
+    participants: raw.participants ?? [],
+    mints: raw.mints ?? [],
+    devWallet: raw.devWallet,
     metadata: {
       slot: raw.slot
     }

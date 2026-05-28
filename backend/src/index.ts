@@ -78,6 +78,7 @@ app.get("/api/ops/metrics", async () => {
     queue: engine.queueStats()
   };
 });
+app.get("/api/ops/coverage", async () => ({ coverage: engine.coverage() }));
 app.get("/api/ops/deadletters", async () => ({ deadLetters: engine.deadLetters(100) }));
 app.post("/api/ops/deadletters/replay", async (request) => {
   const body = (request.body ?? {}) as { limit?: number };

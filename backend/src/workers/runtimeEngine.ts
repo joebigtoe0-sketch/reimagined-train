@@ -110,19 +110,40 @@ export class RuntimeEngine {
     return this.queue.requeueDeadLetters(limit);
   }
 
+  coverage() {
+    return {
+      ...this.heliusAdapter.coverage(),
+      knownTokens: this.state.tokens.size,
+      knownWallets: this.state.wallets.size,
+      knownDevelopers: this.state.developers.size,
+      queue: this.queue.stats()
+    };
+  }
+
   async ingestWebhookPayload(payload: unknown): Promise<number> {
     const rawEvents = this.heliusAdapter.decodeWebhookPayload(payload);
     if (rawEvents.length === 0) return 0;
-    this.heliusAdapter.addDiscoveredWallets(rawEvents.map((e) => e.wallet));
+    this.fanoutDiscovery(rawEvents);
     const canonical = rawEvents.map(normalizeHeliusEvent);
     await this.queueAdapter.publish(canonical);
     await this.repo.checkpoint("helius-webhook", canonical.at(-1)?.signature ?? "");
     return canonical.length;
   }
 
+  private fanoutDiscovery(rawEvents: ReadonlyArray<{ wallet: string; participants?: string[]; mint: string; mints?: string[]; devWallet?: string }>): void {
+    for (const ev of rawEvents) {
+      this.heliusAdapter.addDiscoveredWallet(ev.wallet);
+      if (ev.devWallet) this.heliusAdapter.addDiscoveredWallet(ev.devWallet);
+      if (ev.participants && ev.participants.length > 0) this.heliusAdapter.addDiscoveredWallets(ev.participants);
+      this.heliusAdapter.addDiscoveredMint(ev.mint);
+      if (ev.mints && ev.mints.length > 0) this.heliusAdapter.addDiscoveredMints(ev.mints);
+    }
+  }
+
   private async ingest(onBroadcast: (type: string, payload: unknown) => void): Promise<void> {
     const start = Date.now();
     const rawEvents = await this.heliusAdapter.poll();
+    if (rawEvents.length > 0) this.fanoutDiscovery(rawEvents);
     const canonical = rawEvents.map(normalizeHeliusEvent);
     await this.queueAdapter.publish(canonical);
     await this.repo.checkpoint("ingestion-worker", canonical.at(-1)?.signature ?? "");
@@ -161,13 +182,19 @@ export class RuntimeEngine {
 
   private applyEvent(event: CanonicalEvent): TokenState {
     this.heliusAdapter.addDiscoveredWallet(event.wallet);
+    if (event.devWallet) this.heliusAdapter.addDiscoveredWallet(event.devWallet);
+    if (event.participants && event.participants.length > 0) this.heliusAdapter.addDiscoveredWallets(event.participants);
+    this.heliusAdapter.addDiscoveredMint(event.mint);
+    if (event.mints && event.mints.length > 0) this.heliusAdapter.addDiscoveredMints(event.mints);
+
     const existing = this.state.tokens.get(event.mint);
+    const inferredDev = event.devWallet ?? (event.type === "launch" ? event.wallet : undefined);
     const token: TokenState =
       existing ??
       {
         mint: event.mint,
         symbol: event.mint.slice(0, 6),
-        devWallet: randomDev(event.wallet),
+        devWallet: inferredDev ?? randomDev(event.wallet),
         createdAt: event.timestamp,
         marketCap: Math.max(1_000, event.marketCap || 3_000),
         athMarketCap: Math.max(1_000, event.marketCap || 3_000),
@@ -191,6 +218,10 @@ export class RuntimeEngine {
         lifecycle: "new"
       };
 
+    if (existing && inferredDev && token.devWallet.startsWith("DEV_")) {
+      token.devWallet = inferredDev;
+    }
+
     token.marketCap = event.marketCap > 0 ? event.marketCap : token.marketCap;
     token.athMarketCap = Math.max(token.athMarketCap, token.marketCap);
     if (event.type === "trade") {
@@ -209,9 +240,19 @@ export class RuntimeEngine {
     if (event.type === "funding" || event.type === "transfer") token.insiderConcentration = Math.min(1, token.insiderConcentration + 0.01);
     token.smartWalletCount = Math.max(0, token.smartWalletCount + (event.type === "trade" && event.side === "buy" ? 1 : 0));
 
-    const wallet = updateWalletProfile(this.state.wallets.get(event.wallet), event);
-    this.state.wallets.set(wallet.wallet, wallet);
-    void this.repo.upsertWallet(wallet);
+    const primaryWallet = updateWalletProfile(this.state.wallets.get(event.wallet), event);
+    this.state.wallets.set(primaryWallet.wallet, primaryWallet);
+    void this.repo.upsertWallet(primaryWallet);
+
+    if (event.participants && event.participants.length > 0) {
+      for (const participant of event.participants) {
+        if (!participant || participant === event.wallet || participant === "UNKNOWN_WALLET") continue;
+        const participantEvent: CanonicalEvent = { ...event, wallet: participant };
+        const participantProfile = updateWalletProfile(this.state.wallets.get(participant), participantEvent);
+        this.state.wallets.set(participantProfile.wallet, participantProfile);
+        void this.repo.upsertWallet(participantProfile);
+      }
+    }
 
     const dev = updateDeveloperProfile(this.state.developers.get(token.devWallet), event, token);
     this.state.developers.set(dev.devWallet, dev);
