@@ -120,6 +120,10 @@ export class RuntimeEngine {
     };
   }
 
+  async selfCheck() {
+    return this.heliusAdapter.selfCheck();
+  }
+
   async ingestWebhookPayload(payload: unknown): Promise<number> {
     const rawEvents = this.heliusAdapter.decodeWebhookPayload(payload);
     if (rawEvents.length === 0) return 0;

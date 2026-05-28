@@ -144,6 +144,28 @@ function extractAmountSol(tx: Json, feePayer: string): number {
   return 0;
 }
 
+// Pump.fun bonding curve constants
+const PUMPFUN_VIRTUAL_SOL_RESERVES = 30; // SOL
+const PUMPFUN_VIRTUAL_TOKEN_RESERVES = 1_073_000_191;
+const PUMPFUN_TOTAL_SUPPLY = 1_000_000_000;
+const SOL_USD_ESTIMATE = 150; // conservative; replace with oracle if needed
+
+/** Rough market cap in USD from cumulative SOL in bonding curve. */
+function estimateMarketCap(solAmount: number, type: string): number {
+  if (type === "launch") {
+    // at creation, virtual reserves → initial price × total supply
+    const initialPriceUsd = (PUMPFUN_VIRTUAL_SOL_RESERVES * SOL_USD_ESTIMATE) / PUMPFUN_VIRTUAL_TOKEN_RESERVES;
+    return Math.round(initialPriceUsd * PUMPFUN_TOTAL_SUPPLY);
+  }
+  if (solAmount > 0) {
+    // rough estimate: each SOL buy moves the curve up proportionally
+    const effectiveSol = PUMPFUN_VIRTUAL_SOL_RESERVES + solAmount;
+    const price = (effectiveSol * SOL_USD_ESTIMATE) / PUMPFUN_VIRTUAL_TOKEN_RESERVES;
+    return Math.round(price * PUMPFUN_TOTAL_SUPPLY);
+  }
+  return 0;
+}
+
 export function decodeEnhancedTransactions(payload: unknown): HeliusRawEvent[] {
   const txs = Array.isArray(payload) ? payload : [];
   const events: HeliusRawEvent[] = [];
@@ -167,6 +189,8 @@ export function decodeEnhancedTransactions(payload: unknown): HeliusRawEvent[] {
     const participants = collectParticipants(row, feePayer);
     const devWallet = detectDevWallet(row, type, feePayer);
     const side = type === "trade" ? detectSide(row, mint, feePayer) : undefined;
+    const amountSol = extractAmountSol(row, feePayer);
+    const marketCap = estimateMarketCap(amountSol, type);
 
     events.push({
       signature,
@@ -176,8 +200,8 @@ export function decodeEnhancedTransactions(payload: unknown): HeliusRawEvent[] {
       wallet: feePayer || (participants[0] ?? "UNKNOWN_WALLET"),
       type,
       side,
-      amountSol: extractAmountSol(row, feePayer),
-      marketCap: 0,
+      amountSol,
+      marketCap,
       participants,
       mints,
       devWallet
