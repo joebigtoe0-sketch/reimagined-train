@@ -9,6 +9,8 @@ import { replayTokenTimeline } from "../services/backtest/replayEngine.js";
 import { buildWalletGraph } from "../services/graph/walletGraph.js";
 import { scoreClusterRisk } from "../services/graph/clusterRisk.js";
 import { HeliusAdapter } from "../services/ingestion/heliusAdapter.js";
+import { PumpFunAdapter } from "../services/ingestion/pumpFunAdapter.js";
+import { DexScreenerAdapter } from "../services/ingestion/dexScreenerAdapter.js";
 import { enqueueMeta } from "../services/ingestion/tokenMetadata.js";
 import { updateDeveloperProfile } from "../services/intelligence/developerIntelligence.js";
 import { updateWalletProfile } from "../services/intelligence/walletIntelligence.js";
@@ -32,6 +34,8 @@ export class RuntimeEngine {
   private readonly queueAdapter = new KafkaReadyQueueAdapter(new RedisStreamsQueueAdapter(this.queue));
   private readonly analyticsSink = new ClickHouseReadySink(new LocalAnalyticsSink());
   private readonly heliusAdapter = new HeliusAdapter();
+  private readonly pumpFunAdapter = new PumpFunAdapter();
+  private readonly dexScreener = new DexScreenerAdapter();
   private readonly repo: RuntimeRepo;
   private ingestTimer: NodeJS.Timeout | null = null;
   private parseTimer: NodeJS.Timeout | null = null;
@@ -147,13 +151,76 @@ export class RuntimeEngine {
 
   private async ingest(onBroadcast: (type: string, payload: unknown) => void): Promise<void> {
     const start = Date.now();
+
+    // ── Step 1: Pump.fun API → discover genuinely new launches ──────────────
+    const newTokens = await this.pumpFunAdapter.pollNewLaunches();
+    for (const pt of newTokens) {
+      // Register the mint for Helius trade tracking.
+      this.heliusAdapter.addDiscoveredMint(pt.mint);
+      if (pt.creatorWallet) this.heliusAdapter.addDiscoveredWallet(pt.creatorWallet);
+
+      // Build a canonical launch event with the REAL creation timestamp.
+      const launchEvent: CanonicalEvent = {
+        id: `pumpfun-launch:${pt.mint}`,
+        source: "helius",
+        type: "launch",
+        mint: pt.mint,
+        wallet: pt.creatorWallet || "unknown",
+        devWallet: pt.creatorWallet || undefined,
+        timestamp: pt.createdAt,
+        signature: `pumpfun-launch:${pt.mint}`,
+        amountSol: 0,
+        marketCap: pt.usdMarketCap,
+        participants: pt.creatorWallet ? [pt.creatorWallet] : [],
+        mints: [pt.mint],
+        metadata: { name: pt.name, symbol: pt.symbol }
+      };
+
+      // Store the real name/symbol directly so we don't need a DAS API round-trip.
+      // We patch the token after applyEvent sets it up.
+      await this.queueAdapter.publish([launchEvent]);
+
+      // Pre-seed the in-memory state with the correct name/symbol from Pump.fun.
+      // applyEvent will use the placeholder initially; we patch it right after.
+      const existing = this.state.tokens.get(pt.mint);
+      if (existing) {
+        existing.name = pt.name;
+        existing.symbol = pt.symbol;
+        existing.marketCap = pt.usdMarketCap || existing.marketCap;
+        this.state.tokens.set(pt.mint, existing);
+      }
+    }
+
+    // ── Step 2: Helius → SWAP/trade events for already-tracked mints ────────
     const rawEvents = await this.heliusAdapter.poll();
     if (rawEvents.length > 0) this.fanoutDiscovery(rawEvents);
-    const canonical = rawEvents.map(normalizeHeliusEvent);
-    await this.queueAdapter.publish(canonical);
-    await this.repo.checkpoint("ingestion-worker", canonical.at(-1)?.signature ?? "");
+    const tradeEvents = rawEvents.map(normalizeHeliusEvent);
+    if (tradeEvents.length > 0) {
+      await this.queueAdapter.publish(tradeEvents);
+    }
+
+    // ── Step 3: DexScreener → refresh market cap for active tokens ──────────
+    const activeMints = [...this.state.tokens.keys()].slice(0, 50);
+    const staleMints = this.dexScreener.filterStale(activeMints);
+    if (staleMints.length > 0) {
+      const mcData = await this.dexScreener.fetchBatch(staleMints);
+      this.dexScreener.markFetched(staleMints);
+      for (const [mint, data] of mcData) {
+        const token = this.state.tokens.get(mint);
+        if (token && data.marketCapUsd > 0) {
+          token.marketCap = data.marketCapUsd;
+          token.athMarketCap = Math.max(token.athMarketCap, data.marketCapUsd);
+          token.buyCount = token.buyCount + data.buys24h;
+          token.sellCount = token.sellCount + data.sells24h;
+          this.state.tokens.set(mint, token);
+          void this.repo.upsertToken(token);
+        }
+      }
+    }
+
+    await this.repo.checkpoint("ingestion-worker", new Date().toISOString());
     updateMetrics({ ingestionLagMs: Date.now() - start });
-    onBroadcast("ingestionBatch", { size: canonical.length });
+    onBroadcast("ingestionBatch", { size: newTokens.length + rawEvents.length });
   }
 
   private async parseAndProcess(onBroadcast: (type: string, payload: unknown) => void): Promise<void> {
@@ -200,12 +267,14 @@ export class RuntimeEngine {
     if (event.mints && event.mints.length > 0) this.heliusAdapter.addDiscoveredMints(event.mints);
 
     const inferredDev = event.devWallet ?? (event.type === "launch" ? event.wallet : undefined);
+    const metaName = typeof event.metadata?.name === "string" ? event.metadata.name : "";
+    const metaSymbol = typeof event.metadata?.symbol === "string" ? event.metadata.symbol : "";
     const token: TokenState =
       existing ??
       {
         mint: event.mint,
-        name: `Token ${event.mint.slice(0, 6)}`,
-        symbol: event.mint.slice(0, 6).toUpperCase(),
+        name: metaName || `Token ${event.mint.slice(0, 6)}`,
+        symbol: metaSymbol || event.mint.slice(0, 6).toUpperCase(),
         devWallet: inferredDev ?? randomDev(event.wallet),
         createdAt: event.timestamp,
         marketCap: Math.max(1_000, event.marketCap || 3_000),
@@ -234,8 +303,9 @@ export class RuntimeEngine {
       token.devWallet = inferredDev;
     }
 
-    // Fetch on-chain name/symbol if we still have a placeholder
-    if (!existing || token.name.startsWith("Token ")) {
+    // Fetch on-chain name/symbol from DAS only if we don't already have a real name
+    // (Pump.fun API gives us the name directly, so this is a fallback only).
+    if (token.name.startsWith("Token ") || token.symbol.length <= 4) {
       enqueueMeta(event.mint, (meta) => {
         const t = this.state.tokens.get(meta.mint);
         if (t) {
