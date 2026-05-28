@@ -167,6 +167,7 @@ export class RuntimeEngine {
         this.state.events.unshift(event);
         if (this.state.events.length > 5000) this.state.events.length = 5000;
         const token = this.applyEvent(event);
+        if (!token) continue; // trade on unknown mint — skip
         const alerts = evaluateAlerts(token);
         for (const alert of alerts) {
           this.state.alerts.unshift(alert);
@@ -185,14 +186,19 @@ export class RuntimeEngine {
     updateMetrics({ scoringLatencyMs: Date.now() - start, eventsProcessed: this.state.events.length });
   }
 
-  private applyEvent(event: CanonicalEvent): TokenState {
+  private applyEvent(event: CanonicalEvent): TokenState | null {
+    // Only launch events may create a new token entry.
+    // Trade/transfer/funding events on unknown mints are from tokens that launched
+    // before we started — drop them so historical tokens don't pollute the dashboard.
+    const existing = this.state.tokens.get(event.mint);
+    if (!existing && event.type !== "launch") return null;
+
     this.heliusAdapter.addDiscoveredWallet(event.wallet);
     if (event.devWallet) this.heliusAdapter.addDiscoveredWallet(event.devWallet);
     if (event.participants && event.participants.length > 0) this.heliusAdapter.addDiscoveredWallets(event.participants);
     this.heliusAdapter.addDiscoveredMint(event.mint);
     if (event.mints && event.mints.length > 0) this.heliusAdapter.addDiscoveredMints(event.mints);
 
-    const existing = this.state.tokens.get(event.mint);
     const inferredDev = event.devWallet ?? (event.type === "launch" ? event.wallet : undefined);
     const token: TokenState =
       existing ??

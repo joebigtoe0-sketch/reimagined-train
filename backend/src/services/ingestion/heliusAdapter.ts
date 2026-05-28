@@ -172,11 +172,15 @@ export class HeliusAdapter {
       return [];
     }
 
-    // Subsequent polls: only process transactions newer than our high-water mark.
+    // Subsequent polls: Helius returns newest-first, so slice at the watermark.
+    // Everything BEFORE the watermark index is newer than the last poll.
     const waterMark = this.highWaterMarks.get(address);
-    const fresh = waterMark
-      ? txns.filter((tx) => tx.signature && tx.signature !== waterMark)
-      : txns;
+    const waterMarkIdx = waterMark
+      ? txns.findIndex((tx) => tx.signature === waterMark)
+      : -1;
+    // waterMarkIdx === -1 means ALL items are new (more than one page of new events)
+    // waterMarkIdx === 0 means nothing is new yet
+    const fresh = waterMarkIdx > 0 ? txns.slice(0, waterMarkIdx) : waterMarkIdx === -1 ? txns : [];
 
     // Advance the high-water mark to the newest signature in this page.
     if (newestSig) this.highWaterMarks.set(address, newestSig);
