@@ -10,14 +10,28 @@ interface SignatureRow {
 
 export class HeliusAdapter {
   private lastSignatures = new Set<string>();
-  private readonly monitoredWallets = env.HELIUS_MONITORED_WALLETS.split(",").map((v) => v.trim()).filter(Boolean);
+  private trackedWallets = new Set<string>(env.HELIUS_MONITORED_WALLETS.split(",").map((v) => v.trim()).filter(Boolean));
+  private readonly globalAddresses = env.HELIUS_GLOBAL_ADDRESSES.split(",").map((v) => v.trim()).filter(Boolean);
 
   decodeWebhookPayload(payload: unknown): HeliusRawEvent[] {
     return decodeEnhancedTransactions(payload);
   }
 
+  addDiscoveredWallet(wallet: string): void {
+    const normalized = wallet.trim();
+    if (!normalized || normalized === "UNKNOWN_WALLET") return;
+    this.trackedWallets.add(normalized);
+    if (this.trackedWallets.size > env.HELIUS_MAX_TRACKED_WALLETS) {
+      this.trackedWallets = new Set([...this.trackedWallets].slice(-env.HELIUS_MAX_TRACKED_WALLETS));
+    }
+  }
+
+  addDiscoveredWallets(wallets: string[]): void {
+    for (const wallet of wallets) this.addDiscoveredWallet(wallet);
+  }
+
   async poll(): Promise<HeliusRawEvent[]> {
-    if (!env.HELIUS_API_KEY || this.monitoredWallets.length === 0) return [];
+    if (!env.HELIUS_API_KEY) return [];
     const signatures = await this.fetchSignatures();
     if (signatures.length === 0) return [];
     const enhanced = await this.fetchEnhancedTransactions(signatures.map((s) => s.signature));
@@ -27,8 +41,10 @@ export class HeliusAdapter {
   private async fetchSignatures(): Promise<SignatureRow[]> {
     const rpcUrl = `${env.HELIUS_RPC_URL}${env.HELIUS_API_KEY}`;
     const output: SignatureRow[] = [];
+    const pollAddresses = [...this.globalAddresses, ...this.trackedWallets];
+    if (pollAddresses.length === 0) return [];
 
-    for (const wallet of this.monitoredWallets) {
+    for (const wallet of pollAddresses) {
       const res = await fetch(rpcUrl, {
         method: "POST",
         headers: { "content-type": "application/json" },

@@ -97,6 +97,7 @@ export class RuntimeEngine {
   async ingestWebhookPayload(payload: unknown): Promise<number> {
     const rawEvents = this.heliusAdapter.decodeWebhookPayload(payload);
     if (rawEvents.length === 0) return 0;
+    this.heliusAdapter.addDiscoveredWallets(rawEvents.map((e) => e.wallet));
     const canonical = rawEvents.map(normalizeHeliusEvent);
     await this.queueAdapter.publish(canonical);
     await this.repo.checkpoint("helius-webhook", canonical.at(-1)?.signature ?? "");
@@ -143,6 +144,7 @@ export class RuntimeEngine {
   }
 
   private applyEvent(event: CanonicalEvent): TokenState {
+    this.heliusAdapter.addDiscoveredWallet(event.wallet);
     const existing = this.state.tokens.get(event.mint);
     const token: TokenState =
       existing ??
