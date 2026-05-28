@@ -7,3 +7,5 @@ backend/dist/
 **/.env
 !.env.example
 .DS_Store
+*.tsbuildinfo
+**/*.tsbuildinfo
