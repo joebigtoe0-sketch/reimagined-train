@@ -51,10 +51,8 @@ export class RuntimeEngine {
   start(onBroadcast: (type: string, payload: unknown) => void): void {
     if (this.ingestTimer || this.parseTimer || this.snapshotTimer) return;
 
-    console.log(`[RuntimeEngine] launch source: ${this.bitquery.available ? "BITQUERY ✓" : "HELIUS+PUMPFUN (no BITQUERY_API_KEY set)"}`);
-    if (!this.bitquery.available) {
-      console.warn("[RuntimeEngine] Set BITQUERY_API_KEY in Railway env for best launch detection.");
-    }
+    console.log(`[RuntimeEngine] launch source: ${this.bitquery.available ? "BITQUERY" : "DISABLED (no BITQUERY_API_KEY)"}`);
+    void this.bitquery.verify();
 
     this.ingestTimer = setInterval(() => {
       void this.ingest(onBroadcast);
@@ -129,7 +127,7 @@ export class RuntimeEngine {
       knownWallets: this.state.wallets.size,
       knownDevelopers: this.state.developers.size,
       queue: this.queue.stats(),
-      launchSource: this.bitquery.available ? "bitquery" : "helius+pumpfun",
+      launchSource: this.bitquery.available ? "bitquery" : "disabled",
       bitqueryActive: this.bitquery.available,
     };
   }
@@ -161,62 +159,45 @@ export class RuntimeEngine {
   private async ingest(onBroadcast: (type: string, payload: unknown) => void): Promise<void> {
     const start = Date.now();
 
-    // ── Step 1: Discover new launches ───────────────────────────────────────
-    // Use Bitquery if API key is configured (best coverage, exact timestamps).
-    // Fall back to Pump.fun / Helius-based detection otherwise.
-    const newTokens = this.bitquery.available
-      ? await this.bitquery.pollNewLaunches().then((bqTokens) =>
-          bqTokens.map((t) => ({
-            mint: t.mint, name: t.name, symbol: t.symbol,
-            createdAt: t.createdAt, creatorWallet: t.devWallet,
-            usdMarketCap: 0, complete: false
-          }))
-        )
-      : await this.pumpFunAdapter.pollNewLaunches();
-    for (const pt of newTokens) {
-      // Register the mint for Helius trade tracking.
-      this.heliusAdapter.addDiscoveredMint(pt.mint);
-      if (pt.creatorWallet) this.heliusAdapter.addDiscoveredWallet(pt.creatorWallet);
+    if (!this.bitquery.available) {
+      console.warn("[ingest] Skipping — BITQUERY_API_KEY not set. Add it in Railway env vars.");
+      return;
+    }
 
-      // Build a canonical launch event with the REAL creation timestamp.
+    // ── Step 1: Bitquery → new Pump.fun token launches ──────────────────────
+    const bqTokens = await this.bitquery.pollNewLaunches();
+    for (const pt of bqTokens) {
       const launchEvent: CanonicalEvent = {
-        id: `pumpfun-launch:${pt.mint}`,
+        id: `bq-launch:${pt.mint}`,
         source: "helius",
         type: "launch",
         mint: pt.mint,
-        wallet: pt.creatorWallet || "unknown",
-        devWallet: pt.creatorWallet || undefined,
+        wallet: pt.devWallet || "unknown",
+        devWallet: pt.devWallet || undefined,
         timestamp: pt.createdAt,
-        signature: `pumpfun-launch:${pt.mint}`,
+        signature: `bq-launch:${pt.mint}`,
         amountSol: 0,
-        marketCap: pt.usdMarketCap,
-        participants: pt.creatorWallet ? [pt.creatorWallet] : [],
+        marketCap: 0,
+        participants: pt.devWallet ? [pt.devWallet] : [],
         mints: [pt.mint],
         metadata: { name: pt.name, symbol: pt.symbol }
       };
-
-      // Store the real name/symbol directly so we don't need a DAS API round-trip.
-      // We patch the token after applyEvent sets it up.
       await this.queueAdapter.publish([launchEvent]);
 
-      // Pre-seed the in-memory state with the correct name/symbol from Pump.fun.
-      // applyEvent will use the placeholder initially; we patch it right after.
+      // Patch name/symbol immediately so UI shows correct values right away.
       const existing = this.state.tokens.get(pt.mint);
       if (existing) {
         existing.name = pt.name;
         existing.symbol = pt.symbol;
-        existing.marketCap = pt.usdMarketCap || existing.marketCap;
         this.state.tokens.set(pt.mint, existing);
       }
     }
 
-    // ── Step 2: Trade events for tracked mints ───────────────────────────────
-    // Primary: Bitquery trade stream (when key available).
-    // Supplement/fallback: Helius SWAP polling.
-    const trackedMintsList = [...this.state.tokens.keys()];
-    if (this.bitquery.available && trackedMintsList.length > 0) {
-      const bqTrades = await this.bitquery.pollTrades(trackedMintsList);
-      const bqEvents: CanonicalEvent[] = bqTrades.map((t) => ({
+    // ── Step 2: Bitquery → live trades for tracked mints ────────────────────
+    const trackedMints = [...this.state.tokens.keys()];
+    if (trackedMints.length > 0) {
+      const bqTrades = await this.bitquery.pollTrades(trackedMints);
+      const tradeEvents: CanonicalEvent[] = bqTrades.map((t) => ({
         id: `bq-trade:${t.signature}:${t.traderWallet}`,
         source: "helius" as const,
         type: "trade" as const,
@@ -229,13 +210,7 @@ export class RuntimeEngine {
         side: t.side,
         participants: [t.traderWallet]
       }));
-      if (bqEvents.length > 0) await this.queueAdapter.publish(bqEvents);
-    }
-    const rawEvents = await this.heliusAdapter.poll();
-    if (rawEvents.length > 0) this.fanoutDiscovery(rawEvents);
-    const tradeEvents = rawEvents.map(normalizeHeliusEvent);
-    if (tradeEvents.length > 0) {
-      await this.queueAdapter.publish(tradeEvents);
+      if (tradeEvents.length > 0) await this.queueAdapter.publish(tradeEvents);
     }
 
     // ── Step 3: DexScreener → refresh market cap for active tokens ──────────
@@ -259,7 +234,7 @@ export class RuntimeEngine {
 
     await this.repo.checkpoint("ingestion-worker", new Date().toISOString());
     updateMetrics({ ingestionLagMs: Date.now() - start });
-    onBroadcast("ingestionBatch", { size: newTokens.length + rawEvents.length });
+    onBroadcast("ingestionBatch", { size: bqTokens.length });
   }
 
   private async parseAndProcess(onBroadcast: (type: string, payload: unknown) => void): Promise<void> {

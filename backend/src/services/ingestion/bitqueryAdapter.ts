@@ -106,13 +106,52 @@ query PumpTrades($since: ISO8601DateTime, $mints: [String!]) {
 export class BitqueryAdapter {
   private seenMints = new Set<string>();
   private seenTradeSigs = new Set<string>();
-  // Track the timestamp of the last successful launch/trade poll.
   private lastLaunchPollAt: Date = new Date(Date.now() - 60_000);
   private lastTradePollAt: Date = new Date(Date.now() - 60_000);
   private initialized = false;
+  private _verified = false;
 
   get available(): boolean {
     return !!env.BITQUERY_API_KEY;
+  }
+
+  /** Call once at startup to verify the key actually works. */
+  async verify(): Promise<void> {
+    if (!this.available) {
+      console.error("[Bitquery] BITQUERY_API_KEY is not set — launches will NOT be tracked.");
+      return;
+    }
+    // Simple ping: ask for a single recent token creation
+    const PING_QUERY = `
+      query Ping {
+        Solana {
+          TokenSupplyUpdates(
+            where: {
+              Instruction: {
+                Program: {
+                  Address: { is: "${PUMP_PROGRAM}" }
+                  Method: { in: ["create", "create_v2"] }
+                }
+              }
+            }
+            limit: { count: 1 }
+            orderBy: { descending: Block_Time }
+          ) {
+            Block { Time }
+            TokenSupplyUpdate { Currency { MintAddress Symbol Name } }
+          }
+        }
+      }
+    `;
+    const data = await this.query<{ Solana: { TokenSupplyUpdates: unknown[] } }>(PING_QUERY, {});
+    if (data?.Solana?.TokenSupplyUpdates != null) {
+      this._verified = true;
+      const sample = (data.Solana.TokenSupplyUpdates[0] as { TokenSupplyUpdate?: { Currency?: { Symbol?: string } } } | undefined)?.TokenSupplyUpdate?.Currency?.Symbol ?? "?";
+      console.log(`[Bitquery] ✓ connection verified. Last token on chain: $${sample}`);
+    } else {
+      console.error("[Bitquery] ✗ verification failed — key may be wrong or expired. Check Railway env var BITQUERY_API_KEY.");
+      console.error("[Bitquery] Make sure you use an OAuth2 Bearer Token (NOT the V1 API key). Generate at: https://account.bitquery.io/user/api_v2/access_tokens");
+    }
   }
 
   /** Poll for newly launched tokens. Returns only genuinely new mints. */
