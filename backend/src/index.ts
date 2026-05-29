@@ -73,6 +73,18 @@ app.get("/api/wallets", async () => {
   const wallets = await repo.listWallets(500);
   return { wallets };
 });
+app.get<{ Params: { mint: string } }>("/api/tokens/:mint/trades", async (request) => {
+  const trades = await repo.listTradesByMint(request.params.mint, 1000);
+  return { mint: request.params.mint, trades };
+});
+app.get<{ Params: { wallet: string } }>("/api/wallets/:wallet/trades", async (request) => {
+  const trades = await repo.listTradesByWallet(request.params.wallet, 1000);
+  return { wallet: request.params.wallet, trades };
+});
+app.get<{ Params: { wallet: string } }>("/api/wallets/:wallet/positions", async (request) => {
+  const positions = await repo.listWalletPositions(request.params.wallet, 1000);
+  return { wallet: request.params.wallet, positions };
+});
 app.get("/api/backtest/calibration", async () => ({ report: engine.calibrationReport() }));
 app.get("/api/backtest/replay", async () => ({ replay: engine.listReplay() }));
 app.get("/api/ops/metrics", async () => {

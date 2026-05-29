@@ -15,7 +15,7 @@ import type { IngestionSource } from "../services/ingestion/ingestionSource.js";
 import { detectMayhemMints } from "../services/ingestion/mayhemFilter.js";
 import { env } from "../config/env.js";
 import { updateDeveloperProfile } from "../services/intelligence/developerIntelligence.js";
-import { applyEventToAccount, createWalletAccount, deriveWalletProfile } from "../services/intelligence/walletIntelligence.js";
+import { applyEventToAccount, createWalletAccount, deriveWalletProfile, positionRowFor } from "../services/intelligence/walletIntelligence.js";
 import { buildFeatureRows } from "../services/ml/featurePipeline.js";
 import { runShadowInference } from "../services/ml/inference.js";
 import { updateMetrics } from "../services/observability/metrics.js";
@@ -247,6 +247,7 @@ export class RuntimeEngine {
     for (const event of events) {
       try {
         await this.repo.insertEvent(event);
+        if (event.type === "trade") void this.repo.insertTrade(event);
         this.state.events.unshift(event);
         if (this.state.events.length > 5000) this.state.events.length = 5000;
         const token = this.applyEvent(event);
@@ -414,6 +415,10 @@ export class RuntimeEngine {
     const profile = deriveWalletProfile(account);
     this.state.wallets.set(wallet, profile);
     void this.repo.upsertWallet(profile);
+    if (event.type === "trade") {
+      const position = positionRowFor(account, event.mint);
+      if (position) void this.repo.upsertWalletPosition(position);
+    }
   }
 
   private async snapshot(): Promise<void> {
@@ -430,6 +435,8 @@ export class RuntimeEngine {
       }))
     };
     if (this.redis) await this.redis.xadd("token:snapshots", "*", "data", JSON.stringify(payload));
+    // Durable MC/holder time-series per token so history is queryable later.
+    await this.repo.insertTokenSnapshots(payload.tokens.map((t) => ({ ts: payload.timestamp, ...t })));
     await this.repo.checkpoint("snapshot-worker", payload.timestamp);
     updateMetrics({ websocketFreshnessMs: 250, alertDelayMs: 300 });
   }

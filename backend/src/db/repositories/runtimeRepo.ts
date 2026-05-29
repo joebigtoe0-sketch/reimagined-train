@@ -9,8 +9,8 @@ export class RuntimeRepo {
   async insertEvent(event: CanonicalEvent): Promise<void> {
     if (!this.pool) return;
     await this.pool.query(
-      `INSERT INTO raw_events (event_id, source, event_type, mint, wallet, signature, ts, amount_sol, market_cap, payload)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (event_id) DO NOTHING`,
+      `INSERT INTO raw_events (event_id, source, event_type, mint, wallet, signature, ts, amount_sol, token_amount, market_cap, side, payload)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (event_id) DO NOTHING`,
       [
         event.id,
         event.source,
@@ -20,9 +20,53 @@ export class RuntimeRepo {
         event.signature,
         event.timestamp,
         event.amountSol,
+        event.tokenAmount ?? null,
         event.marketCap,
+        event.side ?? null,
         JSON.stringify(event.metadata ?? {})
       ]
+    );
+  }
+
+  /** Append a buy/sell trade for forensic study (who, side, size, MC, when). */
+  async insertTrade(event: CanonicalEvent): Promise<void> {
+    if (!this.pool || event.type !== "trade" || !event.side) return;
+    await this.pool.query(
+      `INSERT INTO trades (mint, wallet, side, amount_sol, token_amount, market_cap, signature, ts)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [
+        event.mint,
+        event.wallet,
+        event.side,
+        event.amountSol,
+        event.tokenAmount ?? 0,
+        event.marketCap,
+        event.signature,
+        event.timestamp
+      ]
+    );
+  }
+
+  /** Persist a wallet's per-token position so cost basis survives restarts. */
+  async upsertWalletPosition(row: {
+    wallet: string;
+    mint: string;
+    totalBought: number;
+    totalSold: number;
+    avgEntryMc: number;
+    avgExitMc: number;
+    realizedPnl: number;
+    lastActivityAt: string;
+  }): Promise<void> {
+    if (!this.pool) return;
+    await this.pool.query(
+      `INSERT INTO wallet_token_positions (wallet, mint, total_bought, total_sold, avg_entry_mc, avg_exit_mc, realized_pnl, last_activity_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (wallet, mint) DO UPDATE SET
+         total_bought=EXCLUDED.total_bought, total_sold=EXCLUDED.total_sold,
+         avg_entry_mc=EXCLUDED.avg_entry_mc, avg_exit_mc=EXCLUDED.avg_exit_mc,
+         realized_pnl=EXCLUDED.realized_pnl, last_activity_at=EXCLUDED.last_activity_at`,
+      [row.wallet, row.mint, row.totalBought, row.totalSold, row.avgEntryMc, row.avgExitMc, row.realizedPnl, row.lastActivityAt]
     );
   }
 
@@ -365,6 +409,70 @@ export class RuntimeRepo {
   async countRawEvents(): Promise<number> {
     const rows = await this.rawQuery<{ count: string }>(`SELECT COUNT(*)::text AS count FROM raw_events`);
     return Number(rows[0]?.count ?? "0");
+  }
+
+  async insertTokenSnapshots(
+    rows: Array<{ ts: string; mint: string; marketCap: number; holders: number; buySellRatio: number; smartWalletExposure: number; insiderConcentration: number; continuation: number }>
+  ): Promise<void> {
+    if (!this.pool || rows.length === 0) return;
+    for (const r of rows) {
+      await this.pool.query(
+        `INSERT INTO token_snapshots (ts, mint, market_cap, holder_count, buy_sell_ratio, smart_wallet_exposure, insider_concentration, probability_continuation)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [r.ts, r.mint, r.marketCap, r.holders, r.buySellRatio, r.smartWalletExposure, r.insiderConcentration, r.continuation]
+      );
+    }
+  }
+
+  async listTradesByMint(mint: string, limit = 500): Promise<Array<{ wallet: string; side: string; amountSol: number; tokenAmount: number; marketCap: number; signature: string; ts: string }>> {
+    const rows = await this.rawQuery<{ wallet: string; side: string; amount_sol: number; token_amount: number; market_cap: number; signature: string; ts: string }>(
+      `SELECT wallet, side, amount_sol, token_amount, market_cap, signature, ts
+       FROM trades WHERE mint = $1 ORDER BY ts DESC LIMIT $2`,
+      [mint, limit]
+    );
+    return rows.map((r) => ({
+      wallet: r.wallet,
+      side: r.side,
+      amountSol: Number(r.amount_sol ?? 0),
+      tokenAmount: Number(r.token_amount ?? 0),
+      marketCap: Number(r.market_cap ?? 0),
+      signature: r.signature,
+      ts: r.ts
+    }));
+  }
+
+  async listTradesByWallet(wallet: string, limit = 500): Promise<Array<{ mint: string; side: string; amountSol: number; tokenAmount: number; marketCap: number; signature: string; ts: string }>> {
+    const rows = await this.rawQuery<{ mint: string; side: string; amount_sol: number; token_amount: number; market_cap: number; signature: string; ts: string }>(
+      `SELECT mint, side, amount_sol, token_amount, market_cap, signature, ts
+       FROM trades WHERE wallet = $1 ORDER BY ts DESC LIMIT $2`,
+      [wallet, limit]
+    );
+    return rows.map((r) => ({
+      mint: r.mint,
+      side: r.side,
+      amountSol: Number(r.amount_sol ?? 0),
+      tokenAmount: Number(r.token_amount ?? 0),
+      marketCap: Number(r.market_cap ?? 0),
+      signature: r.signature,
+      ts: r.ts
+    }));
+  }
+
+  async listWalletPositions(wallet: string, limit = 500): Promise<Array<{ mint: string; totalBought: number; totalSold: number; avgEntryMc: number; avgExitMc: number; realizedPnl: number; lastActivityAt: string }>> {
+    const rows = await this.rawQuery<{ mint: string; total_bought: number; total_sold: number; avg_entry_mc: number; avg_exit_mc: number; realized_pnl: number; last_activity_at: string }>(
+      `SELECT mint, total_bought, total_sold, avg_entry_mc, avg_exit_mc, realized_pnl, last_activity_at
+       FROM wallet_token_positions WHERE wallet = $1 ORDER BY last_activity_at DESC LIMIT $2`,
+      [wallet, limit]
+    );
+    return rows.map((r) => ({
+      mint: r.mint,
+      totalBought: Number(r.total_bought ?? 0),
+      totalSold: Number(r.total_sold ?? 0),
+      avgEntryMc: Number(r.avg_entry_mc ?? 0),
+      avgExitMc: Number(r.avg_exit_mc ?? 0),
+      realizedPnl: Number(r.realized_pnl ?? 0),
+      lastActivityAt: r.last_activity_at
+    }));
   }
 
   async listWallets(limit = 500): Promise<WalletProfile[]> {

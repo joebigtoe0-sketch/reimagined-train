@@ -22,9 +22,22 @@ interface Position {
   firstBuyTs: number; // ms timestamp of the first buy in the open position
 }
 
+// Cumulative per-token stats (survives position close) for durable persistence.
+interface PositionStats {
+  solBought: number;
+  solSold: number;
+  realizedPnl: number;
+  buyCount: number;
+  closedSells: number;
+  entryMcSum: number;
+  exitMcSum: number;
+  lastTs: number;
+}
+
 export interface WalletAccount {
   wallet: string;
   positions: Map<string, Position>;
+  stats: Map<string, PositionStats>;
   realizedPnlSol: number;
   buys: number;
   sells: number;
@@ -43,6 +56,7 @@ export function createWalletAccount(wallet: string): WalletAccount {
   return {
     wallet,
     positions: new Map(),
+    stats: new Map(),
     realizedPnlSol: 0,
     buys: 0,
     sells: 0,
@@ -56,6 +70,15 @@ export function createWalletAccount(wallet: string): WalletAccount {
     rugFlags: 0,
     lastSeenTs: 0
   };
+}
+
+function statsFor(acc: WalletAccount, mint: string): PositionStats {
+  let s = acc.stats.get(mint);
+  if (!s) {
+    s = { solBought: 0, solSold: 0, realizedPnl: 0, buyCount: 0, closedSells: 0, entryMcSum: 0, exitMcSum: 0, lastTs: 0 };
+    acc.stats.set(mint, s);
+  }
+  return s;
 }
 
 export function applyEventToAccount(acc: WalletAccount, event: CanonicalEvent): void {
@@ -75,9 +98,15 @@ export function applyEventToAccount(acc: WalletAccount, event: CanonicalEvent): 
   const tokenAmount = event.tokenAmount ?? 0;
   const sol = event.amountSol ?? 0;
 
+  const stats = statsFor(acc, event.mint);
+  stats.lastTs = Math.max(stats.lastTs, ts);
+
   if (event.side === "buy") {
     acc.buys += 1;
     acc.entryMcSum += event.marketCap || 0;
+    stats.solBought += sol;
+    stats.buyCount += 1;
+    stats.entryMcSum += event.marketCap || 0;
     let pos = acc.positions.get(event.mint);
     if (!pos || pos.tokens <= 0) {
       pos = { tokens: 0, solCost: 0, firstBuyTs: ts };
@@ -106,9 +135,33 @@ export function applyEventToAccount(acc: WalletAccount, event: CanonicalEvent): 
   acc.holdMinutesSum += Math.max(0, (ts - pos.firstBuyTs) / 60_000);
   acc.exitMcSum += event.marketCap || 0;
 
+  stats.solSold += proceeds;
+  stats.realizedPnl += realized;
+  stats.closedSells += 1;
+  stats.exitMcSum += event.marketCap || 0;
+
   pos.tokens -= sellTokens;
   pos.solCost -= costOfSold;
   if (pos.tokens <= 1e-9) acc.positions.delete(event.mint);
+}
+
+/** Durable per-token position row for persistence, or null if untouched. */
+export function positionRowFor(
+  acc: WalletAccount,
+  mint: string
+): { wallet: string; mint: string; totalBought: number; totalSold: number; avgEntryMc: number; avgExitMc: number; realizedPnl: number; lastActivityAt: string } | null {
+  const s = acc.stats.get(mint);
+  if (!s) return null;
+  return {
+    wallet: acc.wallet,
+    mint,
+    totalBought: Number(s.solBought.toFixed(6)),
+    totalSold: Number(s.solSold.toFixed(6)),
+    avgEntryMc: s.buyCount > 0 ? Number((s.entryMcSum / s.buyCount).toFixed(2)) : 0,
+    avgExitMc: s.closedSells > 0 ? Number((s.exitMcSum / s.closedSells).toFixed(2)) : 0,
+    realizedPnl: Number(s.realizedPnl.toFixed(6)),
+    lastActivityAt: new Date(s.lastTs || Date.now()).toISOString()
+  };
 }
 
 export function deriveWalletProfile(acc: WalletAccount): WalletProfile {

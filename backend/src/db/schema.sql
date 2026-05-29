@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS trades (
   wallet TEXT NOT NULL,
   side TEXT NOT NULL,
   amount_sol NUMERIC NOT NULL,
+  token_amount NUMERIC NOT NULL DEFAULT 0,
   market_cap NUMERIC NOT NULL,
   signature TEXT NOT NULL,
   ts TIMESTAMPTZ NOT NULL
@@ -203,5 +204,6 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_mint_ts ON token_snapshots (mint, ts DE
 CREATE INDEX IF NOT EXISTS idx_tokens_dev ON tokens (dev_wallet);
 CREATE INDEX IF NOT EXISTS idx_raw_events_mint_ts ON raw_events (mint, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_trades_mint_ts ON trades (mint, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_trades_wallet_ts ON trades (wallet, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_signal_obs_mint_ts ON signal_observations (mint, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_positions_wallet ON wallet_token_positions (wallet);
