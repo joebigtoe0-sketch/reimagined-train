@@ -1,4 +1,5 @@
 import type { CanonicalEvent, TokenState } from "../../types.js";
+import { loadStrategyConfig } from "./strategyConfig.js";
 
 /**
  * Entry / exit intelligence.
@@ -57,6 +58,8 @@ export interface EntryAssessment {
   entrySignal: EntrySignal;
   earlyUniqueBuyers: number;
   earlyNetSol: number;
+  /** Passes the tuned breadth gate from config/strategy.json (the validated edge). */
+  qualified: boolean;
 }
 
 export function computeEntry(win: EarlyWindow): EntryAssessment {
@@ -64,6 +67,10 @@ export function computeEntry(win: EarlyWindow): EntryAssessment {
   const avgBuySol = win.buys > 0 ? win.buySol / win.buys : 0;
   const sellBuyRatio = win.buys > 0 ? win.sells / win.buys : win.sells > 0 ? 99 : 0;
   const netSol = win.buySol - win.sellSol;
+
+  const gate = loadStrategyConfig().entry;
+  const qualified =
+    uniqueBuyers >= gate.minBuyers && avgBuySol >= gate.minAvgBuySol && sellBuyRatio < gate.maxSellBuyRatio;
 
   let s = 0;
   // Early breadth — strongest signal (max 45).
@@ -87,10 +94,14 @@ export function computeEntry(win: EarlyWindow): EntryAssessment {
   else if (netSol > 0) s += 8;
 
   const entryScore = Math.max(0, Math.min(100, Math.round(s)));
-  const entrySignal: EntrySignal =
+  // Tuned gate overrides the heuristic buckets: a coin that clears the validated
+  // breadth filter is at least "moderate"; one that fails it can't be "strong".
+  let entrySignal: EntrySignal =
     entryScore >= 70 ? "strong" : entryScore >= 45 ? "moderate" : entryScore >= 25 ? "weak" : "avoid";
+  if (qualified && entrySignal === "weak") entrySignal = "moderate";
+  if (!qualified && entrySignal === "strong") entrySignal = "moderate";
 
-  return { entryScore, entrySignal, earlyUniqueBuyers: uniqueBuyers, earlyNetSol: Number(netSol.toFixed(2)) };
+  return { entryScore, entrySignal, earlyUniqueBuyers: uniqueBuyers, earlyNetSol: Number(netSol.toFixed(2)), qualified };
 }
 
 /**
@@ -98,6 +109,7 @@ export function computeEntry(win: EarlyWindow): EntryAssessment {
  * `retained` = current MC as a fraction of the all-time-high MC.
  */
 export function computeExit(token: TokenState, entryMc: number, ageMinutes: number): ExitSignal {
+  const cfg = loadStrategyConfig().exit;
   const ath = token.athMarketCap;
   const retained = ath > 0 ? token.marketCap / ath : 1;
   const pumped = entryMc > 0 && ath >= entryMc * 1.5;
@@ -105,6 +117,16 @@ export function computeExit(token: TokenState, entryMc: number, ageMinutes: numb
   if (!pumped) {
     return ageMinutes > 12 && retained < 0.6 ? "dead" : "accumulate";
   }
+
+  // Take-profit strategies: once we've hit the target multiple off entry, ring it.
+  if ((cfg.strategy === "tp_2x" || cfg.strategy === "tp_3x") && entryMc > 0) {
+    if (token.marketCap >= entryMc * cfg.tpMultiple) return "take_profit";
+  }
+  // Trailing strategies: bail when we've given back more than trailPct from ATH.
+  if ((cfg.strategy === "trail_30" || cfg.strategy === "trail_50") && retained < 1 - cfg.trailPct) {
+    return retained < 0.4 ? "dead" : "exit";
+  }
+
   if (retained >= 0.92) return "hold"; // at/near highs — let winners run
   if (retained >= 0.7) return "take_profit"; // 8-30% off the top — trim
   if (retained >= 0.4) return "exit"; // breaking down — get out

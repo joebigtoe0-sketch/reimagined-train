@@ -1,0 +1,18 @@
+{
+  "version": "tuned-202605291421",
+  "generatedAt": "2026-05-29T14:21:16.183Z",
+  "promoted": false,
+  "entry": {
+    "minBuyers": 12,
+    "minAvgBuySol": 0.1,
+    "maxSellBuyRatio": 1
+  },
+  "exit": {
+    "strategy": "trail_30",
+    "tpMultiple": 2,
+    "trailPct": 0.3
+  },
+  "backtest": {
+    "note": "No config passed out-of-sample validation across 68 tokens. Keeping defaults."
+  }
+}
