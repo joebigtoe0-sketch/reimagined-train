@@ -17,7 +17,14 @@ const envSchema = z.object({
   HELIUS_MAX_TRACKED_MINTS: z.coerce.number().default(5000),
   HELIUS_SIGNATURE_LIMIT: z.coerce.number().default(50),
   HELIUS_WEBHOOK_SECRET: z.string().optional(),
-  BITQUERY_API_KEY: z.string().optional()
+  BITQUERY_API_KEY: z.string().optional(),
+  // Which feed powers launch + trade ingestion. Toggle freely between providers.
+  INGEST_SOURCE: z.enum(["pumpportal", "bitquery"]).default("pumpportal"),
+  // PumpPortal: new-token stream is free (no key). Trade stream is metered and
+  // requires an API key + a linked wallet funded with >= 0.02 SOL.
+  PUMPPORTAL_API_KEY: z.string().optional(),
+  // PumpPortal reports market cap in SOL; convert to USD with this estimate.
+  SOL_USD_ESTIMATE: z.coerce.number().default(150)
 });
 
 export const env = envSchema.parse(process.env);

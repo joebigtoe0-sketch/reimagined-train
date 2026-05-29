@@ -10,6 +10,7 @@
  */
 
 import { env } from "../../config/env.js";
+import type { IngestionSource } from "./ingestionSource.js";
 
 const ENDPOINT = "https://streaming.bitquery.io/graphql";
 const PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
@@ -137,7 +138,9 @@ query PumpTrades($since: DateTime, $mints: [String!]) {
 
 // ─── Adapter ────────────────────────────────────────────────────────────────
 
-export class BitqueryAdapter {
+export class BitqueryAdapter implements IngestionSource {
+  readonly name = "bitquery";
+
   private seenMints = new Set<string>();
   private seenTradeSigs = new Set<string>();
   private initialized = false;

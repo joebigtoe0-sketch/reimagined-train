@@ -10,6 +10,9 @@ import { buildWalletGraph } from "../services/graph/walletGraph.js";
 import { scoreClusterRisk } from "../services/graph/clusterRisk.js";
 import { HeliusAdapter } from "../services/ingestion/heliusAdapter.js";
 import { BitqueryAdapter } from "../services/ingestion/bitqueryAdapter.js";
+import { PumpPortalAdapter } from "../services/ingestion/pumpPortalAdapter.js";
+import type { IngestionSource } from "../services/ingestion/ingestionSource.js";
+import { env } from "../config/env.js";
 import { updateDeveloperProfile } from "../services/intelligence/developerIntelligence.js";
 import { updateWalletProfile } from "../services/intelligence/walletIntelligence.js";
 import { buildFeatureRows } from "../services/ml/featurePipeline.js";
@@ -35,6 +38,9 @@ export class RuntimeEngine {
   // stats (it makes no network calls anymore). Bitquery is the sole data source.
   private readonly heliusAdapter = new HeliusAdapter();
   private readonly bitquery = new BitqueryAdapter();
+  private readonly pumpPortal = new PumpPortalAdapter();
+  // Active ingestion provider, selected by INGEST_SOURCE. Toggle freely.
+  private readonly source: IngestionSource = env.INGEST_SOURCE === "bitquery" ? this.bitquery : this.pumpPortal;
   private readonly repo: RuntimeRepo;
   private ingestTimer: NodeJS.Timeout | null = null;
   private parseTimer: NodeJS.Timeout | null = null;
@@ -48,8 +54,8 @@ export class RuntimeEngine {
   start(onBroadcast: (type: string, payload: unknown) => void): void {
     if (this.ingestTimer || this.parseTimer || this.snapshotTimer) return;
 
-    console.log(`[RuntimeEngine] launch source: ${this.bitquery.available ? "BITQUERY" : "DISABLED (no BITQUERY_API_KEY)"}`);
-    void this.bitquery.verify();
+    console.log(`[RuntimeEngine] ingest source: ${this.source.name.toUpperCase()} (available=${this.source.available})`);
+    void this.source.verify();
 
     this.ingestTimer = setInterval(() => {
       void this.ingest(onBroadcast);
@@ -124,8 +130,9 @@ export class RuntimeEngine {
       knownWallets: this.state.wallets.size,
       knownDevelopers: this.state.developers.size,
       queue: this.queue.stats(),
-      launchSource: this.bitquery.available ? "bitquery" : "disabled",
-      bitqueryActive: this.bitquery.available,
+      launchSource: this.source.available ? this.source.name : "disabled",
+      bitqueryActive: this.source.name === "bitquery" && this.source.available,
+      pumpportalActive: this.source.name === "pumpportal" && this.source.available,
     };
   }
 
@@ -156,13 +163,13 @@ export class RuntimeEngine {
   private async ingest(onBroadcast: (type: string, payload: unknown) => void): Promise<void> {
     const start = Date.now();
 
-    if (!this.bitquery.available) {
-      console.warn("[ingest] Skipping — BITQUERY_API_KEY not set. Add it in Railway env vars.");
+    if (!this.source.available) {
+      console.warn(`[ingest] Skipping — ingest source ${this.source.name} is not available.`);
       return;
     }
 
-    // ── Step 1: Bitquery → new Pump.fun token launches ──────────────────────
-    const bqTokens = await this.bitquery.pollNewLaunches();
+    // ── Step 1: new Pump.fun token launches ─────────────────────────────────
+    const bqTokens = await this.source.pollNewLaunches();
     for (const pt of bqTokens) {
       const launchEvent: CanonicalEvent = {
         id: `bq-launch:${pt.mint}`,
@@ -174,7 +181,7 @@ export class RuntimeEngine {
         timestamp: pt.createdAt,
         signature: `bq-launch:${pt.mint}`,
         amountSol: 0,
-        marketCap: 0,
+        marketCap: pt.initialMarketCapUsd ?? 0,
         participants: pt.devWallet ? [pt.devWallet] : [],
         mints: [pt.mint],
         metadata: { name: pt.name, symbol: pt.symbol }
@@ -198,7 +205,7 @@ export class RuntimeEngine {
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       .map((t) => t.mint);
     if (trackedMints.length > 0) {
-      const bqTrades = await this.bitquery.pollTrades(trackedMints);
+      const bqTrades = await this.source.pollTrades(trackedMints);
       const tradeEvents: CanonicalEvent[] = bqTrades.map((t) => ({
         id: `bq-trade:${t.signature}:${t.mint}:${t.side}`,
         source: "helius" as const,

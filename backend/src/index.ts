@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
+import type { WebSocket as WsWebSocket } from "ws";
 import { Redis } from "ioredis";
 import { env } from "./config/env.js";
 import { RuntimeRepo } from "./db/repositories/runtimeRepo.js";
@@ -52,7 +53,7 @@ try {
   app.log.warn("Redis bootstrap failed, running in degraded mode");
 }
 
-const wsClients = new Set<WebSocket>();
+const wsClients = new Set<WsWebSocket>();
 const engine = new RuntimeEngine(dbPoolAvailable, redis, env.INGEST_INTERVAL_MS, env.SNAPSHOT_INTERVAL_MS, repo);
 
 app.get("/health", async () => ({ ok: true }));
@@ -134,10 +135,10 @@ app.post("/webhooks/helius", async (request, reply) => {
   return { ok: true, accepted: count };
 });
 
-app.get("/ws", { websocket: true }, async (connection) => {
-  wsClients.add(connection.socket);
+app.get("/ws", { websocket: true }, async (socket) => {
+  wsClients.add(socket);
   const [tokens, alerts, probabilities] = await Promise.all([repo.listTokens(200), repo.listAlerts(200), repo.listProbabilities(200)]);
-  connection.socket.send(
+  socket.send(
     JSON.stringify({
       type: "bootstrap",
       tokens,
@@ -146,7 +147,7 @@ app.get("/ws", { websocket: true }, async (connection) => {
       metrics: getMetrics()
     })
   );
-  connection.socket.onclose = () => wsClients.delete(connection.socket);
+  socket.on("close", () => wsClients.delete(socket));
 });
 
 function broadcast(type: string, payload: unknown): void {
