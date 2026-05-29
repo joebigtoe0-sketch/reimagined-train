@@ -27,6 +27,7 @@ export type TokenState = {
   entryScore?: number;
   entrySignal?: "strong" | "moderate" | "weak" | "avoid";
   exitSignal?: "accumulate" | "hold" | "take_profit" | "exit" | "dead";
+  action?: "BUY" | "WATCH" | "HOLD" | "TRIM" | "EXIT" | "DEAD" | "AVOID";
   earlyUniqueBuyers?: number;
   earlyNetSol?: number;
   peakAt?: string;

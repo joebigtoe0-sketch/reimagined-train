@@ -236,6 +236,18 @@ function entryClass(score: number): string {
   if (score >= 45) return "";
   return "dim";
 }
+// Headline ACTION badge styling — BUY pops, exits warn, dead/avoid dim.
+function actionStyle(a?: string): React.CSSProperties {
+  switch (a) {
+    case "BUY": return { background: "var(--green)", color: "#001b0e", fontWeight: 800, boxShadow: "0 0 8px var(--green-dim)" };
+    case "WATCH": return { background: "var(--green-bg)", color: "var(--green)", border: "1px solid var(--green-dim)" };
+    case "HOLD": return { background: "transparent", color: "var(--green)", border: "1px solid var(--green-dim)" };
+    case "TRIM": return { background: "var(--amber-bg, transparent)", color: "var(--amber, #e0a13a)", border: "1px solid var(--amber, #e0a13a)" };
+    case "EXIT": return { background: "transparent", color: "var(--red)", border: "1px solid var(--red)", fontWeight: 700 };
+    case "DEAD": return { background: "transparent", color: "var(--text-3)", border: "1px solid var(--border)" };
+    default: return { background: "transparent", color: "var(--text-3)", border: "1px solid var(--border)" }; // AVOID
+  }
+}
 
 function TerminalView({ tokens, search, onSelectToken }: {
   tokens: TokenState[]; search: string; onSelectToken: (t: TokenState) => void;
@@ -247,6 +259,7 @@ function TerminalView({ tokens, search, onSelectToken }: {
   const [onlySmart, setOnlySmart] = useState(false);
   const [onlyRunners, setOnlyRunners] = useState(false);
   const [onlyAlpha, setOnlyAlpha] = useState(false);
+  const [onlyBuy, setOnlyBuy] = useState(false);
 
   const sorted = useMemo(() => {
     let arr = tokens.filter(t => {
@@ -256,6 +269,7 @@ function TerminalView({ tokens, search, onSelectToken }: {
       if (onlySmart && t.smartWalletCount < 2) return false;
       if (onlyRunners && (t.entryScore ?? 0) < 45) return false;
       if (onlyAlpha && (t.smartMoneyBuys ?? 0) < 1) return false;
+      if (onlyBuy && t.action !== "BUY") return false;
       if (search) {
         const s = search.toLowerCase();
         if (!t.symbol.toLowerCase().includes(s) && !t.name.toLowerCase().includes(s) && !t.mint.toLowerCase().includes(s)) return false;
@@ -272,7 +286,7 @@ function TerminalView({ tokens, search, onSelectToken }: {
       return sortDir === "asc" ? av - bv : bv - av;
     });
     return arr;
-  }, [tokens, sortKey, sortDir, phaseFilter, minProb, onlySmart, onlyRunners, onlyAlpha, search]);
+  }, [tokens, sortKey, sortDir, phaseFilter, minProb, onlySmart, onlyRunners, onlyAlpha, onlyBuy, search]);
 
   const setSort = (k: SortKey) => {
     if (sortKey === k) setSortDir(d => d === "asc" ? "desc" : "asc");
@@ -293,6 +307,12 @@ function TerminalView({ tokens, search, onSelectToken }: {
         <div className="filterbar">
           <span className="ascii-h">LIVE TOKEN FEED</span>
           <span className="muted">·</span>
+          <button onClick={() => setOnlyBuy(s => !s)} style={{
+            padding: "3px 10px", background: onlyBuy ? "var(--green)" : "transparent",
+            color: onlyBuy ? "#001b0e" : "var(--green)", fontWeight: 800,
+            border: "1px solid var(--green-dim)",
+            fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em",
+          }}>{onlyBuy ? "✓" : "▸"} buy now</button>
           <label>phase</label>
           <div className="seg">
             {["ALL", "LAUNCH", "CURVE", "PUMPSWAP", "DEAD"].map(p => (
@@ -335,6 +355,7 @@ function TerminalView({ tokens, search, onSelectToken }: {
                 <th style={{ width: 28 }}>#</th>
                 <th onClick={() => setSort("createdAt")} className={sIcon("createdAt")} style={{ width: 56 }}>AGE</th>
                 <th>TICKER</th>
+                <th style={{ width: 72 }}>ACTION</th>
                 <th style={{ width: 90 }}>PHASE</th>
                 <th onClick={() => setSort("marketCap")} className={sIcon("marketCap") + " right"} style={{ textAlign: "right", width: 80 }}>MC</th>
                 <th onClick={() => setSort("volume")} className={sIcon("volume") + " right"} style={{ textAlign: "right", width: 80 }}>VOL</th>
@@ -373,6 +394,11 @@ function TerminalView({ tokens, search, onSelectToken }: {
                         <span className="ca">{t.name && t.name !== t.symbol ? t.name.slice(0, 14) : ""}</span>
                       </div>
                     </td>
+                    <td>
+                      <span style={{ ...actionStyle(dead ? "DEAD" : t.action), padding: "2px 7px", borderRadius: 3, fontSize: 10, letterSpacing: "0.05em", display: "inline-block" }}>
+                        {dead ? "DEAD" : (t.action ?? "WATCH")}
+                      </span>
+                    </td>
                     <td><span className={`badge ${phaseBadge(phase)}`}>{phase}</span></td>
                     <td className="right">${fmtMC(t.marketCap)}</td>
                     <td className="right dim">{t.volume ? "$" + fmtMC(t.volume) : "—"}</td>
@@ -394,7 +420,7 @@ function TerminalView({ tokens, search, onSelectToken }: {
                 );
               })}
               {sorted.length === 0 && (
-                <tr><td colSpan={18} style={{ color: "var(--text-3)", padding: "32px 10px", textAlign: "center" }}>
+                <tr><td colSpan={19} style={{ color: "var(--text-3)", padding: "32px 10px", textAlign: "center" }}>
                   {tokens.length === 0 ? "Waiting for Pump.fun launches…" : "No tokens match filters."}
                 </td></tr>
               )}

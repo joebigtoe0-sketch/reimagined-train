@@ -466,7 +466,8 @@ export class RuntimeRepo {
       earlyNetSol: 0,
       peakAt: r.created_at,
       lastTradeAt: r.last_trade_at ?? r.created_at,
-      smartMoneyBuys: Number(r.smart_money_buys ?? 0)
+      smartMoneyBuys: Number(r.smart_money_buys ?? 0),
+      action: terminal ? "DEAD" : "WATCH"
       } as TokenState;
     });
   }

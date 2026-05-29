@@ -16,7 +16,7 @@ import { detectMayhemMints } from "../services/ingestion/mayhemFilter.js";
 import { env } from "../config/env.js";
 import { updateDeveloperProfile } from "../services/intelligence/developerIntelligence.js";
 import { applyEventToAccount, createWalletAccount, deriveWalletProfile, positionRowFor } from "../services/intelligence/walletIntelligence.js";
-import { applyTradeToWindow, computeEntry, computeExit, createEarlyWindow, EARLY_WINDOW_MS } from "../services/intelligence/entryExit.js";
+import { applyTradeToWindow, computeAction, computeEntry, computeExit, createEarlyWindow, EARLY_WINDOW_MS } from "../services/intelligence/entryExit.js";
 import { buildFeatureRows } from "../services/ml/featurePipeline.js";
 import { runShadowInference } from "../services/ml/inference.js";
 import { updateMetrics } from "../services/observability/metrics.js";
@@ -147,6 +147,7 @@ export class RuntimeEngine {
       token.probabilityMigration = 0;
       token.probabilityRug = Math.max(token.probabilityRug, 90);
       token.exitSignal = "dead";
+      token.action = "DEAD";
       this.state.tokens.set(token.mint, token);
       void this.repo.upsertToken(token);
       onBroadcast("tokenUpdate", token);
@@ -403,7 +404,8 @@ export class RuntimeEngine {
         earlyNetSol: 0,
         peakAt: event.timestamp,
         lastTradeAt: event.timestamp,
-        smartMoneyBuys: 0
+        smartMoneyBuys: 0,
+        action: "WATCH"
       };
 
     if (existing && inferredDev && token.devWallet.startsWith("DEV_")) {
@@ -497,6 +499,17 @@ export class RuntimeEngine {
     }
     const ageMinutes = (Date.now() - (Date.parse(token.createdAt) || Date.now())) / 60_000;
     token.exitSignal = computeExit(token, win.entryMc || token.marketCap, ageMinutes);
+    token.action = computeAction({
+      lifecycle: token.lifecycle,
+      athMarketCap: token.athMarketCap,
+      entryMc: win.entryMc || token.marketCap,
+      ageMinutes,
+      entryScore: token.entryScore,
+      entrySignal: entry.entrySignal,
+      qualified: entry.qualified,
+      smartMoneyBuys: token.smartMoneyBuys,
+      exitSignal: token.exitSignal
+    });
 
     const dev = updateDeveloperProfile(this.state.developers.get(token.devWallet), event, token);
     this.state.developers.set(dev.devWallet, dev);

@@ -29,6 +29,8 @@ export interface EarlyWindow {
 
 export type EntrySignal = "strong" | "moderate" | "weak" | "avoid";
 export type ExitSignal = "accumulate" | "hold" | "take_profit" | "exit" | "dead";
+/** The single headline call shown to the user: what to do right now. */
+export type ActionSignal = "BUY" | "WATCH" | "HOLD" | "TRIM" | "EXIT" | "DEAD" | "AVOID";
 
 export function createEarlyWindow(startMs: number, entryMc: number): EarlyWindow {
   return { startMs, entryMc: entryMc > 0 ? entryMc : 0, buyers: new Set(), buys: 0, sells: 0, buySol: 0, sellSol: 0 };
@@ -131,4 +133,48 @@ export function computeExit(token: TokenState, entryMc: number, ageMinutes: numb
   if (retained >= 0.7) return "take_profit"; // 8-30% off the top — trim
   if (retained >= 0.4) return "exit"; // breaking down — get out
   return "dead"; // already dumped
+}
+
+/**
+ * The headline ACTION call — one signal that tells the user what to do now.
+ *
+ *  BUY   — fresh, alive, not yet pumped, AND high conviction (cleared the tuned
+ *          breadth gate, scored well, or smart money is in). The "get in" moment.
+ *  WATCH — building but not confirmed; keep it on screen.
+ *  HOLD  — already ran and holding near highs (if you're in, let it run).
+ *  TRIM  — ran and rolling a bit off the top (take some profit).
+ *  EXIT  — broke down, get out.
+ *  DEAD  — gone.
+ *  AVOID — weak/dust with no breadth, or too late and never delivered.
+ */
+export function computeAction(args: {
+  lifecycle: TokenState["lifecycle"];
+  athMarketCap: number;
+  entryMc: number;
+  ageMinutes: number;
+  entryScore: number;
+  entrySignal: EntrySignal;
+  qualified: boolean;
+  smartMoneyBuys: number;
+  exitSignal: ExitSignal;
+}): ActionSignal {
+  if (args.lifecycle === "dead" || args.lifecycle === "failed") return "DEAD";
+
+  const pumped = args.entryMc > 0 && args.athMarketCap >= args.entryMc * 1.5;
+  if (pumped) {
+    // It already ran — this is now a manage-the-position call.
+    if (args.exitSignal === "hold") return "HOLD";
+    if (args.exitSignal === "take_profit") return "TRIM";
+    return "EXIT"; // exit / dead
+  }
+
+  // Pre-entry: only call BUY while it's still realistically enterable (fresh)
+  // and conviction is real (tuned gate, strong score, or smart money present).
+  const fresh = args.ageMinutes <= 10;
+  const smart = args.smartMoneyBuys >= 1;
+  const conviction = smart || (args.qualified && args.entryScore >= 45) || args.entrySignal === "strong";
+  if (fresh && conviction) return "BUY";
+  if (fresh && (args.entrySignal === "moderate" || args.entryScore >= 30)) return "WATCH";
+  if (args.entrySignal === "avoid") return "AVOID";
+  return fresh ? "WATCH" : "AVOID";
 }
