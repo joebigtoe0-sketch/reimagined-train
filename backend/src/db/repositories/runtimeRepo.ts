@@ -173,22 +173,57 @@ export class RuntimeRepo {
     );
   }
 
-  async upsertTokenOutcome(mint: string, currentMc: number, lifecycle: string): Promise<void> {
+  /**
+   * Record observed milestones for a token. `reached_*` is based on the real
+   * all-time-high market cap; `migrated` comes from real migration events.
+   * Rug + local-top are NOT set here — they're computed from observed price
+   * action by relabelMaturedOutcomes() so the label is never circular.
+   */
+  async upsertTokenOutcome(mint: string, athMc: number, migrated: boolean): Promise<void> {
     if (!this.pool) return;
-    const reached25k = currentMc >= 25_000;
-    const reached100k = currentMc >= 100_000;
-    const migrated = lifecycle === "migrated";
-    const rugged = lifecycle === "failed";
+    const reached25k = athMc >= 25_000;
+    const reached100k = athMc >= 100_000;
     await this.pool.query(
       `INSERT INTO token_outcomes (mint, reached_25k, reached_100k, migrated, rugged, evaluated_at)
-       VALUES ($1,$2,$3,$4,$5,now())
+       VALUES ($1,$2,$3,$4,FALSE,now())
        ON CONFLICT (mint) DO UPDATE SET reached_25k = token_outcomes.reached_25k OR EXCLUDED.reached_25k,
          reached_100k = token_outcomes.reached_100k OR EXCLUDED.reached_100k,
          migrated = token_outcomes.migrated OR EXCLUDED.migrated,
-         rugged = token_outcomes.rugged OR EXCLUDED.rugged,
          evaluated_at = now()`,
-      [mint, reached25k, reached100k, migrated, rugged]
+      [mint, reached25k, reached100k, migrated]
     );
+  }
+
+  /**
+   * Label matured tokens with REAL, observed outcomes (no model feedback loop):
+   *  - rugged: token had a real peak then collapsed (current MC <= 15% of ATH)
+   *  - local_top_at: timestamp of the highest observed market cap (best exit)
+   * Only tokens older than `maturityMinutes` are evaluated so we don't label
+   * coins that simply haven't played out yet. One set-based query covers all.
+   */
+  async relabelMaturedOutcomes(maturityMinutes = 15, minRelevantMc = 4_000, rugDropFraction = 0.15): Promise<number> {
+    if (!this.pool) return 0;
+    const result = await this.pool.query(
+      `INSERT INTO token_outcomes (mint, reached_25k, reached_100k, migrated, rugged, local_top_at, evaluated_at)
+       SELECT t.mint,
+              t.ath_mc >= 25000,
+              t.ath_mc >= 100000,
+              (t.lifecycle = 'migrated'),
+              (t.ath_mc >= $2 AND t.current_mc <= t.ath_mc * $3),
+              (SELECT s.ts FROM token_snapshots s WHERE s.mint = t.mint ORDER BY s.market_cap DESC, s.ts ASC LIMIT 1),
+              now()
+       FROM tokens t
+       WHERE t.created_at < now() - ($1 || ' minutes')::interval
+       ON CONFLICT (mint) DO UPDATE SET
+         reached_25k = token_outcomes.reached_25k OR EXCLUDED.reached_25k,
+         reached_100k = token_outcomes.reached_100k OR EXCLUDED.reached_100k,
+         migrated = token_outcomes.migrated OR EXCLUDED.migrated,
+         rugged = EXCLUDED.rugged,
+         local_top_at = COALESCE(EXCLUDED.local_top_at, token_outcomes.local_top_at),
+         evaluated_at = now()`,
+      [String(maturityMinutes), minRelevantMc, rugDropFraction]
+    );
+    return (result as { rowCount?: number }).rowCount ?? 0;
   }
 
   async insertAlert(alert: AlertEvent): Promise<void> {

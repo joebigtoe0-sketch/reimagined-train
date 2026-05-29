@@ -49,6 +49,7 @@ export class RuntimeEngine {
   private ingestTimer: NodeJS.Timeout | null = null;
   private parseTimer: NodeJS.Timeout | null = null;
   private snapshotTimer: NodeJS.Timeout | null = null;
+  private labelTimer: NodeJS.Timeout | null = null;
   private calibration: CalibrationReport = { sampleSize: 0, brierScore: 0, precision: 0, recall: 0, driftDelta: 0 };
 
   constructor(poolAvailable: boolean, private readonly redis: Redis | null, private readonly ingestIntervalMs: number, private readonly snapshotIntervalMs: number, repo: RuntimeRepo) {
@@ -72,15 +73,22 @@ export class RuntimeEngine {
     this.snapshotTimer = setInterval(() => {
       void this.snapshot();
     }, this.snapshotIntervalMs);
+
+    // Label matured tokens with real observed outcomes for learning/backtests.
+    this.labelTimer = setInterval(() => {
+      void this.repo.relabelMaturedOutcomes().catch((err) => console.warn("[label] relabel error:", err instanceof Error ? err.message : err));
+    }, 60_000);
   }
 
   stop(): void {
     if (this.ingestTimer) clearInterval(this.ingestTimer);
     if (this.parseTimer) clearInterval(this.parseTimer);
+    if (this.labelTimer) clearInterval(this.labelTimer);
     if (this.snapshotTimer) clearInterval(this.snapshotTimer);
     this.ingestTimer = null;
     this.parseTimer = null;
     this.snapshotTimer = null;
+    this.labelTimer = null;
   }
 
   listTokens(): TokenState[] {
@@ -401,7 +409,7 @@ export class RuntimeEngine {
     this.state.probabilities.unshift(probability);
     if (this.state.probabilities.length > 5000) this.state.probabilities.length = 5000;
     void this.repo.insertProbability(probability);
-    void this.repo.upsertTokenOutcome(scored.mint, scored.marketCap, scored.lifecycle);
+    void this.repo.upsertTokenOutcome(scored.mint, scored.athMarketCap, scored.lifecycle === "migrated");
 
     const graph = buildWalletGraph(this.state.events.slice(0, 1200));
     const clusterRisk = scoreClusterRisk(graph);
