@@ -33,6 +33,9 @@ function randomDev(wallet: string): string {
 
 // Max tokens we keep an active (metered) trade subscription for at once.
 const MAX_TRADE_SUBSCRIPTIONS = 400;
+// A token with no observed trade within this window is considered dead and we
+// stop paying to track it. New tokens count from launch (lastTradeAt=createdAt).
+const ACTIVE_WINDOW_MS = 3 * 60 * 1000;
 
 export class RuntimeEngine {
   private readonly state = new RuntimeState();
@@ -220,15 +223,16 @@ export class RuntimeEngine {
       }
     }
 
-    // ── Step 2: Bitquery → live trades for tracked mints (bonding-curve feed) ─
-    // Track the most-recently-launched tokens first; older tokens rarely trade
-    // on the bonding curve. One query covers all of them (buys + sells).
-    // Market cap is derived from the trade price (no DexScreener needed).
-    // Cap active trade subscriptions to the most-recent tokens. PumpPortal's
-    // trade stream is metered, so subscribing to every token forever would burn
-    // the budget and stall the feed. Older tokens drop off as new ones launch.
+    // ── Step 2: live trades for tracked mints (bonding-curve feed) ───────────
+    // "Track until dead": we keep a (metered) trade subscription for a token only
+    // while it's still alive — i.e. it traded within ACTIVE_WINDOW_MS. A token
+    // that goes quiet for that long is considered dead and dropped, freeing the
+    // budget for live ones. New tokens get the full window from launch (their
+    // lastTradeAt starts at createdAt) to show their first trades.
+    const now = Date.now();
     const trackedMints = [...this.state.tokens.values()]
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .filter((t) => now - (Date.parse(t.lastTradeAt) || Date.parse(t.createdAt) || now) < ACTIVE_WINDOW_MS)
+      .sort((a, b) => (Date.parse(b.lastTradeAt) || 0) - (Date.parse(a.lastTradeAt) || 0))
       .map((t) => t.mint)
       .slice(0, MAX_TRADE_SUBSCRIPTIONS);
     if (trackedMints.length > 0) {
@@ -335,7 +339,8 @@ export class RuntimeEngine {
         exitSignal: "accumulate",
         earlyUniqueBuyers: 0,
         earlyNetSol: 0,
-        peakAt: event.timestamp
+        peakAt: event.timestamp,
+        lastTradeAt: event.timestamp
       };
 
     if (existing && inferredDev && token.devWallet.startsWith("DEV_")) {
@@ -355,6 +360,7 @@ export class RuntimeEngine {
       token.peakAt = event.timestamp;
     }
     if (event.type === "trade") {
+      token.lastTradeAt = event.timestamp;
       token.volume += event.amountSol;
       if (event.side === "buy") {
         token.buyCount += 1;

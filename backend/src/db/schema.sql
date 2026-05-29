@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS tokens (
   smart_wallet_count INTEGER NOT NULL DEFAULT 0,
   smart_wallet_net_flow NUMERIC NOT NULL DEFAULT 0,
   insider_concentration NUMERIC NOT NULL DEFAULT 0,
-  lifecycle TEXT NOT NULL DEFAULT 'new'
+  lifecycle TEXT NOT NULL DEFAULT 'new',
+  last_trade_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS developers (

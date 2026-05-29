@@ -71,7 +71,8 @@ export function launchToken(): TokenState {
     exitSignal: "accumulate",
     earlyUniqueBuyers: 0,
     earlyNetSol: 0,
-    peakAt: new Date().toISOString()
+    peakAt: new Date().toISOString(),
+    lastTradeAt: new Date().toISOString()
   };
 
   const scored = scoreToken(token);

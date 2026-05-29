@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, CSSProperties } from "react";
-import type { AlertEvent, AlertRule, TokenState, WalletProfile } from "../lib/contracts";
+import type { AlertEvent, AlertRule, DeveloperStat, TokenState, WalletProfile } from "../lib/contracts";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8080";
 const WS_BASE = API_BASE.startsWith("https://")
@@ -36,6 +36,13 @@ function fmtClock(d: Date): string {
 function shortAddr(a: string): string {
   if (!a || a.length < 8) return a;
   return a.slice(0, 4) + "…" + a.slice(-4);
+}
+const DEAD_MS = 2 * 60 * 1000;
+// A token is "dead" once no trade has landed for DEAD_MS (or it migrated/failed).
+function isDeadToken(t: TokenState): boolean {
+  if (t.lifecycle === "failed" || t.lifecycle === "migrated") return true;
+  const last = t.lastTradeAt ? new Date(t.lastTradeAt).getTime() : new Date(t.createdAt).getTime();
+  return Date.now() - last > DEAD_MS;
 }
 
 // ─── Map real data to display phase ───────────────────────────────────────
@@ -167,11 +174,12 @@ function Header({ search, setSearch, coverage, wsConnected }: {
 }
 
 // ─── Tabs ───────────────────────────────────────────────────────────────────
-type TabId = "terminal" | "token" | "wallets" | "alerts";
+type TabId = "terminal" | "token" | "wallets" | "devs" | "alerts";
 const TAB_DEFS: { id: TabId; label: string; desc: string }[] = [
   { id: "terminal", label: "TERMINAL", desc: "live token feed" },
   { id: "token",    label: "TOKEN",    desc: "deep-dive" },
   { id: "wallets",  label: "WALLETS",  desc: "intelligence" },
+  { id: "devs",     label: "DEVS",     desc: "creator stats" },
   { id: "alerts",   label: "ALERTS",   desc: "event stream" },
 ];
 
@@ -243,7 +251,7 @@ function TerminalView({ tokens, search, onSelectToken }: {
 
   const sorted = useMemo(() => {
     let arr = tokens.filter(t => {
-      const phase = toPhase(t.lifecycle);
+      const phase = isDeadToken(t) ? "DEAD" : toPhase(t.lifecycle);
       if (phaseFilter !== "ALL" && phase !== phaseFilter) return false;
       if (t.probabilityContinuation < minProb) return false;
       if (onlySmart && t.smartWalletCount < 2) return false;
@@ -340,10 +348,11 @@ function TerminalView({ tokens, search, onSelectToken }: {
             </thead>
             <tbody>
               {sorted.map((t, i) => {
-                const phase = toPhase(t.lifecycle);
+                const dead = isDeadToken(t);
+                const phase = dead ? "DEAD" : toPhase(t.lifecycle);
                 const insider = t.insiderConcentration ?? 0;
                 return (
-                  <tr key={t.mint} onClick={() => onSelectToken(t)}>
+                  <tr key={t.mint} onClick={() => onSelectToken(t)} style={dead ? { opacity: 0.45 } : undefined}>
                     <td className="dim">{String(i + 1).padStart(3, "0")}</td>
                     <td className="dim">{t.createdAt ? fmtAge(t.createdAt) : "—"}</td>
                     <td>
@@ -924,6 +933,156 @@ function AlertsView({ alerts, rules, onSelectToken, tokens }: {
   );
 }
 
+// ─── DEVS VIEW ───────────────────────────────────────────────────────────────
+type DevSort = "tokens" | "migrated" | "hits25k" | "rugged" | "bestAth" | "avgAth" | "reputation";
+
+function DevsView({ developers, search, onSelectToken, tokens }: {
+  developers: DeveloperStat[]; search: string;
+  onSelectToken: (t: TokenState) => void; tokens: TokenState[];
+}): ReactElement {
+  const [sortKey, setSortKey] = useState<DevSort>("tokens");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [selected, setSelected] = useState<string | null>(null);
+
+  const filtered = useMemo(() => {
+    let arr = developers.filter(d => {
+      if (search) { const s = search.toLowerCase(); if (!d.devWallet.toLowerCase().includes(s)) return false; }
+      return true;
+    });
+    arr = [...arr].sort((a, b) => {
+      const av = (a[sortKey] as number) ?? 0; const bv = (b[sortKey] as number) ?? 0;
+      return sortDir === "asc" ? av - bv : bv - av;
+    });
+    return arr;
+  }, [developers, sortKey, sortDir, search]);
+
+  const setSort = (k: DevSort) => {
+    if (sortKey === k) setSortDir(d => d === "asc" ? "desc" : "asc");
+    else { setSortKey(k); setSortDir("desc"); }
+  };
+  const sIcon = (k: DevSort) => sortKey === k ? (sortDir === "asc" ? "sort-asc" : "sort-desc") : "";
+
+  const sel = selected ?? filtered[0]?.devWallet ?? null;
+  const selDev = filtered.find(d => d.devWallet === sel) ?? null;
+  const devTokens = useMemo(
+    () => tokens.filter(t => t.devWallet && t.devWallet === sel)
+      .sort((a, b) => (b.athMarketCap ?? 0) - (a.athMarketCap ?? 0)),
+    [tokens, sel]
+  );
+
+  return (
+    <div className="view" style={{ display: "grid", gridTemplateColumns: "1fr 380px", gap: 1, background: "var(--border)", height: "100%", overflow: "hidden" }}>
+      <div style={{ display: "flex", flexDirection: "column", minHeight: 0, background: "var(--bg)", overflow: "hidden" }}>
+        <div className="filterbar">
+          <span className="ascii-h">DEVELOPER INTELLIGENCE</span>
+          <span className="muted">·</span>
+          <span className="muted">creators ranked by observed launches & outcomes</span>
+          <div className="spacer" />
+          <span className="muted">{filtered.length} devs</span>
+        </div>
+
+        <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th style={{ width: 28 }}>#</th>
+                <th>DEV WALLET</th>
+                <th onClick={() => setSort("tokens")} className={sIcon("tokens") + " right"} style={{ textAlign: "right", width: 70 }}>LAUNCHES</th>
+                <th onClick={() => setSort("migrated")} className={sIcon("migrated") + " right"} style={{ textAlign: "right", width: 70 }}>MIGR.</th>
+                <th onClick={() => setSort("hits25k")} className={sIcon("hits25k") + " right"} style={{ textAlign: "right", width: 80 }}>≥25k</th>
+                <th onClick={() => setSort("rugged")} className={sIcon("rugged") + " right"} style={{ textAlign: "right", width: 70 }}>RUGS</th>
+                <th onClick={() => setSort("bestAth")} className={sIcon("bestAth") + " right"} style={{ textAlign: "right", width: 90 }}>BEST ATH</th>
+                <th onClick={() => setSort("avgAth")} className={sIcon("avgAth") + " right"} style={{ textAlign: "right", width: 90 }}>AVG ATH</th>
+                <th style={{ width: 56 }}>LAST</th>
+                <th onClick={() => setSort("reputation")} className={sIcon("reputation")} style={{ width: 90 }}>REP</th>
+                <th style={{ width: 60 }}>COPY</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.slice(0, 300).map((d, i) => (
+                <tr key={d.devWallet} onClick={() => setSelected(d.devWallet)} className={sel === d.devWallet ? "selected" : ""}>
+                  <td className="dim">{String(i + 1).padStart(3, "0")}</td>
+                  <td className="addr">{shortAddr(d.devWallet)}</td>
+                  <td className={`right ${d.tokens >= 8 ? "down" : ""}`}>{d.tokens}</td>
+                  <td className={`right ${d.migrated > 0 ? "up" : "dim"}`}>{d.migrated}</td>
+                  <td className={`right ${d.hits25k > 0 ? "up" : "dim"}`}>{d.hits25k}</td>
+                  <td className={`right ${d.rugged > 0 ? "down" : "dim"}`}>{d.rugged}</td>
+                  <td className="right">${fmtMC(d.bestAth)}</td>
+                  <td className="right dim">${fmtMC(d.avgAth)}</td>
+                  <td className="dim">{d.lastLaunch ? fmtAge(d.lastLaunch) : "—"}</td>
+                  <td><ProbBar value={d.reputation} /></td>
+                  <td onClick={e => e.stopPropagation()}><CopyCell value={d.devWallet} /></td>
+                </tr>
+              ))}
+              {filtered.length === 0 && (
+                <tr><td colSpan={11} style={{ color: "var(--text-3)", padding: "32px 10px", textAlign: "center" }}>
+                  {developers.length === 0 ? "Developer stats populate as tokens are tracked." : "No devs match search."}
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* dev detail panel: this creator's tokens */}
+      <div style={{ display: "flex", flexDirection: "column", background: "var(--bg-1)", minHeight: 0, overflow: "auto" }}>
+        {selDev ? (
+          <>
+            <div style={{ padding: 16, borderBottom: "1px solid var(--border)" }}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 16 }}>
+                <ScoreDonut value={selDev.reputation} size={84} label="REP" />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 11, color: "var(--text-3)", marginBottom: 4 }}>DEV WALLET</div>
+                  <div style={{ fontSize: 12, wordBreak: "break-all", marginBottom: 6 }}>{selDev.devWallet}</div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    <span className="badge">{selDev.tokens} launches</span>
+                    {selDev.migrated > 0 && <span className="badge g">{selDev.migrated} migrated</span>}
+                    {selDev.rugged > 0 && <span className="badge r">{selDev.rugged} rugs</span>}
+                    {selDev.tokens >= 8 && selDev.migrated === 0 && <span className="badge r">serial spammer</span>}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div style={{ padding: 14 }}>
+              <div className="ascii-h" style={{ marginBottom: 8 }}>TOKENS BY THIS DEV {devTokens.length > 0 ? `(${devTokens.length} live)` : ""}</div>
+              <table className="tbl">
+                <thead>
+                  <tr>
+                    <th>TICKER</th>
+                    <th style={{ textAlign: "right" }}>MC</th>
+                    <th style={{ textAlign: "right" }}>ATH</th>
+                    <th style={{ width: 70 }}>PHASE</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {devTokens.slice(0, 40).map(t => {
+                    const phase = isDeadToken(t) ? "DEAD" : toPhase(t.lifecycle);
+                    return (
+                      <tr key={t.mint} onClick={() => onSelectToken(t)}>
+                        <td><span className="sym">${t.symbol}</span></td>
+                        <td className="right">${fmtMC(t.marketCap)}</td>
+                        <td className="right dim">${fmtMC(t.athMarketCap ?? 0)}</td>
+                        <td><span className={`badge ${phaseBadge(phase)}`}>{phase}</span></td>
+                      </tr>
+                    );
+                  })}
+                  {devTokens.length === 0 && (
+                    <tr><td colSpan={4} style={{ color: "var(--text-3)", padding: "16px 10px", textAlign: "center" }}>
+                      No live tokens from this dev in the current feed.
+                    </td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </>
+        ) : (
+          <div style={{ padding: 24, color: "var(--text-3)" }}>Select a developer.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // MAIN APP
 // ═══════════════════════════════════════════════════════════════════════════
@@ -932,6 +1091,7 @@ export default function Home(): ReactElement {
   const [search, setSearch] = useState("");
   const [tokens, setTokens] = useState<TokenState[]>([]);
   const [wallets, setWallets] = useState<WalletProfile[]>([]);
+  const [developers, setDevelopers] = useState<DeveloperStat[]>([]);
   const [alerts, setAlerts] = useState<AlertEvent[]>([]);
   const [rules, setRules] = useState<AlertRule[]>([]);
   const [coverage, setCoverage] = useState<CoverageSnapshot | null>(null);
@@ -944,23 +1104,26 @@ export default function Home(): ReactElement {
   useEffect(() => {
     const load = async (): Promise<void> => {
       try {
-        const [tR, aR, ruR, cR, wR] = await Promise.all([
+        const [tR, aR, ruR, cR, wR, dR] = await Promise.all([
           fetch(`${API_BASE}/api/tokens`),
           fetch(`${API_BASE}/api/alerts`),
           fetch(`${API_BASE}/api/alerts/rules`),
           fetch(`${API_BASE}/api/ops/coverage`),
           fetch(`${API_BASE}/api/wallets`),
+          fetch(`${API_BASE}/api/developers`),
         ]);
         const tj = await tR.json() as { tokens?: TokenState[] };
         const aj = await aR.json() as { alerts?: AlertEvent[] };
         const ruj = await ruR.json() as { rules?: AlertRule[] };
         const cj = await cR.json() as { coverage?: CoverageSnapshot };
         const wj = await wR.json() as { wallets?: WalletProfile[] };
+        const dj = await dR.json() as { developers?: DeveloperStat[] };
         if (tj.tokens) setTokens(tj.tokens);
         if (aj.alerts) setAlerts(aj.alerts);
         setRules(ruj.rules ?? []);
         setCoverage(cj.coverage ?? null);
         if (wj.wallets) setWallets(wj.wallets);
+        if (dj.developers) setDevelopers(dj.developers);
       } catch { /* backend may be starting */ }
     };
     void load();
@@ -1003,7 +1166,7 @@ export default function Home(): ReactElement {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement).tagName === "INPUT") return;
-      const keys: Record<string, TabId> = { "1": "terminal", "2": "token", "3": "wallets", "4": "alerts" };
+      const keys: Record<string, TabId> = { "1": "terminal", "2": "token", "3": "wallets", "4": "devs", "5": "alerts" };
       if (keys[e.key]) setTab(keys[e.key]);
       if (e.key === "/") { e.preventDefault(); document.querySelector<HTMLInputElement>(".hdr-search input")?.focus(); }
     };
@@ -1027,6 +1190,9 @@ export default function Home(): ReactElement {
         )}
         {tab === "wallets" && (
           <WalletsView wallets={wallets} search={search} onSelectWallet={setSelectedWallet} selectedWallet={selectedWallet} />
+        )}
+        {tab === "devs" && (
+          <DevsView developers={developers} search={search} onSelectToken={handleSelectToken} tokens={tokens} />
         )}
         {tab === "alerts" && (
           <AlertsView alerts={alerts} rules={rules} onSelectToken={handleSelectToken} tokens={tokens} />

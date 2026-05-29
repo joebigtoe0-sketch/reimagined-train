@@ -73,15 +73,16 @@ export class RuntimeRepo {
   async upsertToken(token: TokenState): Promise<void> {
     if (!this.pool) return;
     await this.pool.query(
-      `INSERT INTO tokens (mint, name, symbol, dev_wallet, created_at, current_mc, ath_mc, holder_count, buy_count, sell_count, volume, smart_wallet_count, smart_wallet_net_flow, insider_concentration, lifecycle)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+      `INSERT INTO tokens (mint, name, symbol, dev_wallet, created_at, current_mc, ath_mc, holder_count, buy_count, sell_count, volume, smart_wallet_count, smart_wallet_net_flow, insider_concentration, lifecycle, last_trade_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
        ON CONFLICT (mint) DO UPDATE SET
          name = CASE WHEN EXCLUDED.name != '' AND EXCLUDED.name NOT LIKE 'Token %' THEN EXCLUDED.name ELSE tokens.name END,
          symbol = CASE WHEN EXCLUDED.symbol != '' AND length(EXCLUDED.symbol) > 4 THEN EXCLUDED.symbol ELSE tokens.symbol END,
          current_mc = EXCLUDED.current_mc, ath_mc = EXCLUDED.ath_mc, holder_count = EXCLUDED.holder_count,
          buy_count = EXCLUDED.buy_count, sell_count = EXCLUDED.sell_count, volume = EXCLUDED.volume,
          smart_wallet_count = EXCLUDED.smart_wallet_count, smart_wallet_net_flow = EXCLUDED.smart_wallet_net_flow,
-         insider_concentration = EXCLUDED.insider_concentration, lifecycle = EXCLUDED.lifecycle`,
+         insider_concentration = EXCLUDED.insider_concentration, lifecycle = EXCLUDED.lifecycle,
+         last_trade_at = COALESCE(EXCLUDED.last_trade_at, tokens.last_trade_at)`,
       [
         token.mint,
         token.name,
@@ -97,7 +98,8 @@ export class RuntimeRepo {
         token.smartWalletCount,
         token.smartWalletNetFlow,
         token.insiderConcentration,
-        token.lifecycle
+        token.lifecycle,
+        token.lastTradeAt && token.lastTradeAt !== token.createdAt ? token.lastTradeAt : null
       ]
     );
   }
@@ -326,6 +328,7 @@ export class RuntimeRepo {
       smart_wallet_net_flow: number;
       insider_concentration: number;
       lifecycle: TokenState["lifecycle"];
+      last_trade_at?: string | null;
       continuation?: number;
       migration?: number;
       rug?: number;
@@ -337,7 +340,7 @@ export class RuntimeRepo {
       score?: number;
     }>(
       `SELECT t.mint, COALESCE(t.name, '') AS name, t.symbol, t.dev_wallet, t.created_at, t.current_mc, t.ath_mc, t.holder_count, t.buy_count, t.sell_count, t.volume,
-              t.smart_wallet_count, t.smart_wallet_net_flow, t.insider_concentration, t.lifecycle,
+              t.smart_wallet_count, t.smart_wallet_net_flow, t.insider_concentration, t.lifecycle, t.last_trade_at,
               ph.continuation, ph.migration, ph.rug, ph.hit25k_before10k, ph.hit100k_before25k, ph.hit30k_before10k, ph.local_top, ph.local_top_within_n_minutes, ph.score
        FROM tokens t
        LEFT JOIN LATERAL (
@@ -347,7 +350,7 @@ export class RuntimeRepo {
          ORDER BY p.ts DESC
          LIMIT 1
        ) ph ON TRUE
-       ORDER BY t.current_mc DESC
+       ORDER BY COALESCE(t.last_trade_at, t.created_at) DESC
        LIMIT $1`,
       [limit]
     );
@@ -383,8 +386,75 @@ export class RuntimeRepo {
       exitSignal: "accumulate",
       earlyUniqueBuyers: 0,
       earlyNetSol: 0,
-      peakAt: r.created_at
+      peakAt: r.created_at,
+      lastTradeAt: r.last_trade_at ?? r.created_at
     }));
+  }
+
+  /**
+   * Real developer intelligence, aggregated directly from observed tokens —
+   * completely separate from per-wallet trading stats. Synthetic placeholder
+   * dev wallets (DEV_*) are excluded so only real creators show up.
+   */
+  async listDeveloperStats(limit = 200): Promise<Array<{
+    devWallet: string;
+    tokens: number;
+    migrated: number;
+    hits25k: number;
+    rugged: number;
+    avgAth: number;
+    bestAth: number;
+    lastLaunch: string;
+    reputation: number;
+  }>> {
+    const rows = await this.rawQuery<{
+      dev_wallet: string;
+      tokens: number;
+      migrated: number;
+      hits25k: number;
+      rugged: number;
+      avg_ath: number;
+      best_ath: number;
+      last_launch: string;
+    }>(
+      `SELECT t.dev_wallet,
+              count(*)::int AS tokens,
+              count(*) FILTER (WHERE t.lifecycle = 'migrated')::int AS migrated,
+              count(*) FILTER (WHERE t.ath_mc >= 25000)::int AS hits25k,
+              count(*) FILTER (WHERE o.rugged)::int AS rugged,
+              COALESCE(round(avg(t.ath_mc)),0)::float8 AS avg_ath,
+              COALESCE(round(max(t.ath_mc)),0)::float8 AS best_ath,
+              max(t.created_at) AS last_launch
+       FROM tokens t
+       LEFT JOIN token_outcomes o ON o.mint = t.mint
+       WHERE t.dev_wallet IS NOT NULL AND t.dev_wallet <> '' AND t.dev_wallet NOT LIKE 'DEV\\_%'
+       GROUP BY t.dev_wallet
+       ORDER BY tokens DESC, best_ath DESC
+       LIMIT $1`,
+      [limit]
+    );
+    return rows.map((r) => {
+      const tokens = Number(r.tokens) || 0;
+      const migrated = Number(r.migrated) || 0;
+      const hits25k = Number(r.hits25k) || 0;
+      const rugged = Number(r.rugged) || 0;
+      const rate = (x: number) => (tokens > 0 ? x / tokens : 0);
+      const reputation = Math.max(
+        1,
+        Math.min(99, Math.round(50 + rate(migrated) * 30 + rate(hits25k) * 20 - rate(rugged) * 45))
+      );
+      return {
+        devWallet: r.dev_wallet,
+        tokens,
+        migrated,
+        hits25k,
+        rugged,
+        avgAth: Number(r.avg_ath) || 0,
+        bestAth: Number(r.best_ath) || 0,
+        lastLaunch: r.last_launch,
+        reputation
+      };
+    });
   }
 
   async listAlerts(limit = 100): Promise<AlertEvent[]> {

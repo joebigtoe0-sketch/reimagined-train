@@ -2,6 +2,7 @@ export type TokenState = {
   mint: string;
   name: string;
   symbol: string;
+  devWallet?: string;
   createdAt: string;
   marketCap: number;
   athMarketCap?: number;
@@ -29,6 +30,19 @@ export type TokenState = {
   earlyUniqueBuyers?: number;
   earlyNetSol?: number;
   peakAt?: string;
+  lastTradeAt?: string;
+};
+
+export type DeveloperStat = {
+  devWallet: string;
+  tokens: number;
+  migrated: number;
+  hits25k: number;
+  rugged: number;
+  avgAth: number;
+  bestAth: number;
+  lastLaunch: string;
+  reputation: number;
 };
 
 export type AlertEvent = {

@@ -43,6 +43,7 @@ export interface TokenState {
   earlyUniqueBuyers: number; // unique buyers in first 5 min
   earlyNetSol: number; // net SOL inflow in first 5 min
   peakAt: string; // timestamp of the all-time-high market cap
+  lastTradeAt: string; // timestamp of the most recent observed trade
 }
 
 export interface WalletProfile {

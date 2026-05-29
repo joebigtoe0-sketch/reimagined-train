@@ -73,6 +73,10 @@ app.get("/api/wallets", async () => {
   const wallets = await repo.listWallets(500);
   return { wallets };
 });
+app.get("/api/developers", async () => {
+  const developers = await repo.listDeveloperStats(300);
+  return { developers };
+});
 app.get<{ Params: { mint: string } }>("/api/tokens/:mint/trades", async (request) => {
   const trades = await repo.listTradesByMint(request.params.mint, 1000);
   return { mint: request.params.mint, trades };
