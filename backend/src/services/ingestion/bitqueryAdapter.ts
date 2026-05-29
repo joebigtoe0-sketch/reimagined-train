@@ -44,6 +44,7 @@ export interface BitqueryTrade {
   traderWallet: string;
   side: "buy" | "sell";
   amountSol: number;
+  tokenAmount: number;
   priceUsd: number;
   marketCap: number; // priceUsd * 1B supply (pump tokens always have 1B supply)
   signature: string;
@@ -330,6 +331,7 @@ export class BitqueryAdapter implements IngestionSource {
           traderWallet: trade.Account?.Address ?? "",
           side,
           amountSol: trade.Side?.Amount ?? 0,
+          tokenAmount: trade.Amount ?? 0,
           priceUsd,
           marketCap: priceUsd > 0 ? Math.round(priceUsd * PUMP_TOKEN_SUPPLY) : 0,
           signature: sig,

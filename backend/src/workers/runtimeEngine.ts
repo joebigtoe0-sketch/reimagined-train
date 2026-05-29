@@ -15,7 +15,7 @@ import type { IngestionSource } from "../services/ingestion/ingestionSource.js";
 import { detectMayhemMints } from "../services/ingestion/mayhemFilter.js";
 import { env } from "../config/env.js";
 import { updateDeveloperProfile } from "../services/intelligence/developerIntelligence.js";
-import { updateWalletProfile } from "../services/intelligence/walletIntelligence.js";
+import { applyEventToAccount, createWalletAccount, deriveWalletProfile } from "../services/intelligence/walletIntelligence.js";
 import { buildFeatureRows } from "../services/ml/featurePipeline.js";
 import { runShadowInference } from "../services/ml/inference.js";
 import { updateMetrics } from "../services/observability/metrics.js";
@@ -226,6 +226,7 @@ export class RuntimeEngine {
         timestamp: t.timestamp,
         signature: t.signature,
         amountSol: t.amountSol,
+        tokenAmount: t.tokenAmount,
         marketCap: t.marketCap,
         side: t.side,
         participants: t.traderWallet ? [t.traderWallet] : []
@@ -343,17 +344,15 @@ export class RuntimeEngine {
     if (event.type === "funding" || event.type === "transfer") token.insiderConcentration = Math.min(1, token.insiderConcentration + 0.01);
     token.smartWalletCount = Math.max(0, token.smartWalletCount + (event.type === "trade" && event.side === "buy" ? 1 : 0));
 
-    const primaryWallet = updateWalletProfile(this.state.wallets.get(event.wallet), event);
-    this.state.wallets.set(primaryWallet.wallet, primaryWallet);
-    void this.repo.upsertWallet(primaryWallet);
-
-    if (event.participants && event.participants.length > 0) {
-      for (const participant of event.participants) {
-        if (!participant || participant === event.wallet || participant === "UNKNOWN_WALLET") continue;
-        const participantEvent: CanonicalEvent = { ...event, wallet: participant };
-        const participantProfile = updateWalletProfile(this.state.wallets.get(participant), participantEvent);
-        this.state.wallets.set(participantProfile.wallet, participantProfile);
-        void this.repo.upsertWallet(participantProfile);
+    // Wallet stats are derived only from real trades, so every wallet starts
+    // at zero and only moves on observed buys/sells.
+    if (event.type === "trade") {
+      this.updateWallet(event.wallet, event);
+      if (event.participants && event.participants.length > 0) {
+        for (const participant of event.participants) {
+          if (!participant || participant === event.wallet || participant === "UNKNOWN_WALLET") continue;
+          this.updateWallet(participant, { ...event, wallet: participant });
+        }
       }
     }
 
@@ -402,6 +401,19 @@ export class RuntimeEngine {
     this.state.tokens.set(scored.mint, scored);
 
     return scored;
+  }
+
+  private updateWallet(wallet: string, event: CanonicalEvent): void {
+    if (!wallet || wallet === "UNKNOWN_WALLET" || wallet === "unknown") return;
+    let account = this.state.walletAccounts.get(wallet);
+    if (!account) {
+      account = createWalletAccount(wallet);
+      this.state.walletAccounts.set(wallet, account);
+    }
+    applyEventToAccount(account, event);
+    const profile = deriveWalletProfile(account);
+    this.state.wallets.set(wallet, profile);
+    void this.repo.upsertWallet(profile);
   }
 
   private async snapshot(): Promise<void> {

@@ -31,6 +31,7 @@ interface PumpPortalMessage {
   traderPublicKey?: string;
   txType?: string; // "create" | "buy" | "sell"
   solAmount?: number;
+  tokenAmount?: number;
   marketCapSol?: number;
   name?: string;
   symbol?: string;
@@ -185,6 +186,7 @@ export class PumpPortalAdapter implements IngestionSource {
         traderWallet: msg.traderPublicKey ?? "",
         side: msg.txType,
         amountSol: msg.solAmount ?? 0,
+        tokenAmount: msg.tokenAmount ?? 0,
         priceUsd: mcUsd > 0 ? mcUsd / PUMP_TOKEN_SUPPLY : 0,
         marketCap: mcUsd > 0 ? Math.round(mcUsd) : 0,
         signature: msg.signature,

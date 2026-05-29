@@ -21,6 +21,7 @@ export interface TradeInfo {
   traderWallet: string;
   side: "buy" | "sell";
   amountSol: number;
+  tokenAmount: number;
   priceUsd: number;
   marketCap: number;
   signature: string;
