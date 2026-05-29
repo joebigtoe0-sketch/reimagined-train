@@ -10,6 +10,10 @@ export class RuntimeState {
   readonly tokenHolders = new Map<string, Set<string>>();
   // First-5-min participation window per mint, for entry scoring.
   readonly earlyWindows = new Map<string, EarlyWindow>();
+  // Proven-predictive ("alpha") wallets, refreshed periodically from outcomes.
+  readonly alphaWallets = new Set<string>();
+  // Distinct alpha wallets that have bought each mint (for the smart-money badge).
+  readonly smartMoneyByMint = new Map<string, Set<string>>();
   readonly developers = new Map<string, DeveloperProfile>();
   readonly alerts: AlertEvent[] = [];
   readonly probabilities: ProbabilityRecord[] = [];

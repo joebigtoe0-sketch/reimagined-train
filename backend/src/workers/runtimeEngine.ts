@@ -38,6 +38,8 @@ const MAX_TRADE_SUBSCRIPTIONS = 400;
 const ACTIVE_WINDOW_MS = 3 * 60 * 1000;
 // No trade for this long ⇒ the token is dead (UI + probabilities reflect it).
 const DEAD_AFTER_MS = 2 * 60 * 1000;
+// How often we recompute the proven-predictive ("alpha") wallet set from outcomes.
+const ALPHA_REFRESH_MS = 10 * 60 * 1000;
 
 export class RuntimeEngine {
   private readonly state = new RuntimeState();
@@ -57,6 +59,7 @@ export class RuntimeEngine {
   private snapshotTimer: NodeJS.Timeout | null = null;
   private labelTimer: NodeJS.Timeout | null = null;
   private reaperTimer: NodeJS.Timeout | null = null;
+  private alphaTimer: NodeJS.Timeout | null = null;
   private calibration: CalibrationReport = { sampleSize: 0, brierScore: 0, precision: 0, recall: 0, driftDelta: 0 };
 
   constructor(poolAvailable: boolean, private readonly redis: Redis | null, private readonly ingestIntervalMs: number, private readonly snapshotIntervalMs: number, repo: RuntimeRepo) {
@@ -91,6 +94,25 @@ export class RuntimeEngine {
     this.reaperTimer = setInterval(() => {
       this.reapDeadTokens(onBroadcast);
     }, 15_000);
+
+    // Refresh the proven-predictive ("alpha") wallet set from real outcomes so
+    // "smart money bought" reflects who's actually been picking winners lately.
+    void this.refreshAlphaWallets();
+    this.alphaTimer = setInterval(() => {
+      void this.refreshAlphaWallets();
+    }, ALPHA_REFRESH_MS);
+  }
+
+  private async refreshAlphaWallets(): Promise<void> {
+    try {
+      const alpha = await this.repo.listPredictiveWallets();
+      if (alpha.length === 0) return;
+      this.state.alphaWallets.clear();
+      for (const a of alpha) this.state.alphaWallets.add(a.wallet);
+      console.log(`[alpha] tracking ${this.state.alphaWallets.size} proven-predictive wallets`);
+    } catch (err) {
+      console.warn("[alpha] refresh error:", err instanceof Error ? err.message : err);
+    }
   }
 
   stop(): void {
@@ -98,12 +120,14 @@ export class RuntimeEngine {
     if (this.parseTimer) clearInterval(this.parseTimer);
     if (this.labelTimer) clearInterval(this.labelTimer);
     if (this.reaperTimer) clearInterval(this.reaperTimer);
+    if (this.alphaTimer) clearInterval(this.alphaTimer);
     if (this.snapshotTimer) clearInterval(this.snapshotTimer);
     this.ingestTimer = null;
     this.parseTimer = null;
     this.snapshotTimer = null;
     this.labelTimer = null;
     this.reaperTimer = null;
+    this.alphaTimer = null;
   }
 
   /**
@@ -378,7 +402,8 @@ export class RuntimeEngine {
         earlyUniqueBuyers: 0,
         earlyNetSol: 0,
         peakAt: event.timestamp,
-        lastTradeAt: event.timestamp
+        lastTradeAt: event.timestamp,
+        smartMoneyBuys: 0
       };
 
     if (existing && inferredDev && token.devWallet.startsWith("DEV_")) {
@@ -436,6 +461,20 @@ export class RuntimeEngine {
       }
     }
 
+    // Smart-money detection: a proven-predictive wallet buying THIS coin is a
+    // strong live signal. Count distinct alpha buyers per mint.
+    if (event.type === "trade" && event.side === "buy" && this.state.alphaWallets.has(event.wallet)) {
+      let set = this.state.smartMoneyByMint.get(token.mint);
+      if (!set) {
+        set = new Set();
+        this.state.smartMoneyByMint.set(token.mint, set);
+      }
+      set.add(event.wallet);
+      token.smartMoneyBuys = set.size;
+    } else {
+      token.smartMoneyBuys = this.state.smartMoneyByMint.get(token.mint)?.size ?? token.smartMoneyBuys ?? 0;
+    }
+
     // Entry/exit intelligence: maintain the first-5-min participation window and
     // derive a live "should I ape / should I bail" read from observed action.
     let win = this.state.earlyWindows.get(token.mint);
@@ -449,6 +488,13 @@ export class RuntimeEngine {
     token.entrySignal = entry.entrySignal;
     token.earlyUniqueBuyers = entry.earlyUniqueBuyers;
     token.earlyNetSol = entry.earlyNetSol;
+    // Smart money is the strongest live confirmation we have — boost the entry
+    // read when proven pickers are in (1 ⇒ at least moderate, 2+ ⇒ strong).
+    if (token.smartMoneyBuys > 0) {
+      token.entryScore = Math.min(100, token.entryScore + Math.min(30, token.smartMoneyBuys * 15));
+      if (token.smartMoneyBuys >= 2) token.entrySignal = "strong";
+      else if (token.entrySignal === "avoid" || token.entrySignal === "weak") token.entrySignal = "moderate";
+    }
     const ageMinutes = (Date.now() - (Date.parse(token.createdAt) || Date.now())) / 60_000;
     token.exitSignal = computeExit(token, win.entryMc || token.marketCap, ageMinutes);
 

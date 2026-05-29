@@ -72,7 +72,8 @@ export function launchToken(): TokenState {
     earlyUniqueBuyers: 0,
     earlyNetSol: 0,
     peakAt: new Date().toISOString(),
-    lastTradeAt: new Date().toISOString()
+    lastTradeAt: new Date().toISOString(),
+    smartMoneyBuys: 0
   };
 
   const scored = scoreToken(token);

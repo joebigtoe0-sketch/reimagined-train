@@ -31,6 +31,7 @@ export type TokenState = {
   earlyNetSol?: number;
   peakAt?: string;
   lastTradeAt?: string;
+  smartMoneyBuys?: number;
 };
 
 export type DeveloperStat = {

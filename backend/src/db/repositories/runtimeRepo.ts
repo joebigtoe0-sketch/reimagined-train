@@ -73,8 +73,8 @@ export class RuntimeRepo {
   async upsertToken(token: TokenState): Promise<void> {
     if (!this.pool) return;
     await this.pool.query(
-      `INSERT INTO tokens (mint, name, symbol, dev_wallet, created_at, current_mc, ath_mc, holder_count, buy_count, sell_count, volume, smart_wallet_count, smart_wallet_net_flow, insider_concentration, lifecycle, last_trade_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+      `INSERT INTO tokens (mint, name, symbol, dev_wallet, created_at, current_mc, ath_mc, holder_count, buy_count, sell_count, volume, smart_wallet_count, smart_wallet_net_flow, insider_concentration, lifecycle, last_trade_at, smart_money_buys)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
        ON CONFLICT (mint) DO UPDATE SET
          name = CASE WHEN EXCLUDED.name != '' AND EXCLUDED.name NOT LIKE 'Token %' THEN EXCLUDED.name ELSE tokens.name END,
          symbol = CASE WHEN EXCLUDED.symbol != '' AND length(EXCLUDED.symbol) > 4 THEN EXCLUDED.symbol ELSE tokens.symbol END,
@@ -82,7 +82,8 @@ export class RuntimeRepo {
          buy_count = EXCLUDED.buy_count, sell_count = EXCLUDED.sell_count, volume = EXCLUDED.volume,
          smart_wallet_count = EXCLUDED.smart_wallet_count, smart_wallet_net_flow = EXCLUDED.smart_wallet_net_flow,
          insider_concentration = EXCLUDED.insider_concentration, lifecycle = EXCLUDED.lifecycle,
-         last_trade_at = COALESCE(EXCLUDED.last_trade_at, tokens.last_trade_at)`,
+         last_trade_at = COALESCE(EXCLUDED.last_trade_at, tokens.last_trade_at),
+         smart_money_buys = GREATEST(EXCLUDED.smart_money_buys, tokens.smart_money_buys)`,
       [
         token.mint,
         token.name,
@@ -99,7 +100,8 @@ export class RuntimeRepo {
         token.smartWalletNetFlow,
         token.insiderConcentration,
         token.lifecycle,
-        token.lastTradeAt && token.lastTradeAt !== token.createdAt ? token.lastTradeAt : null
+        token.lastTradeAt && token.lastTradeAt !== token.createdAt ? token.lastTradeAt : null,
+        token.smartMoneyBuys ?? 0
       ]
     );
   }
@@ -116,6 +118,63 @@ export class RuntimeRepo {
       [String(minutes)]
     );
     return (result as { rowCount?: number }).rowCount ?? 0;
+  }
+
+  /**
+   * Proven-predictive ("alpha") wallets: addresses whose EARLY buys (first
+   * `windowMin` min) landed on coins that went on to reach `winMult`× the
+   * wallet's entry market cap, far more often than the base rate. This is a
+   * *picker* metric (do their coins pump), distinct from the wallet's own PnL.
+   * Used live to flag "smart money just bought" on fresh launches.
+   */
+  async listPredictiveWallets(opts?: {
+    maturityMin?: number;
+    windowMin?: number;
+    winMult?: number;
+    minPicks?: number;
+    minHitRate?: number;
+    limit?: number;
+  }): Promise<Array<{ wallet: string; picks: number; hitRate: number }>> {
+    if (!this.pool) return [];
+    const maturityMin = opts?.maturityMin ?? 25;
+    const windowMin = opts?.windowMin ?? 5;
+    const winMult = opts?.winMult ?? 2;
+    const minPicks = opts?.minPicks ?? 4;
+    const minHitRate = opts?.minHitRate ?? 0.5;
+    const limit = opts?.limit ?? 300;
+    const result = await this.pool.query(
+      `WITH peaks AS (
+         SELECT tr.mint, MAX(tr.market_cap)::float8 AS peak_mc, MIN(t.created_at) AS created_at
+         FROM trades tr JOIN tokens t ON t.mint = tr.mint
+         WHERE t.created_at < now() - ($1 || ' minutes')::interval AND tr.market_cap > 0
+         GROUP BY tr.mint
+       ),
+       early AS (
+         SELECT DISTINCT ON (tr.wallet, tr.mint) tr.wallet, tr.mint, tr.market_cap::float8 AS entry_mc
+         FROM trades tr JOIN peaks p ON p.mint = tr.mint
+         WHERE tr.side = 'buy' AND tr.market_cap > 0 AND tr.wallet <> 'UNKNOWN_WALLET'
+           AND tr.ts <= p.created_at + ($2 || ' minutes')::interval
+         ORDER BY tr.wallet, tr.mint, tr.ts ASC
+       ),
+       picks AS (
+         SELECT e.wallet, (p.peak_mc / e.entry_mc) AS mult
+         FROM early e JOIN peaks p ON p.mint = e.mint
+         WHERE e.entry_mc > 0
+       )
+       SELECT wallet, count(*)::int AS picks,
+              avg(CASE WHEN mult >= $3 THEN 1 ELSE 0 END)::float8 AS hit_rate
+       FROM picks
+       GROUP BY wallet
+       HAVING count(*) >= $4 AND avg(CASE WHEN mult >= $3 THEN 1 ELSE 0 END) >= $5
+       ORDER BY hit_rate DESC, picks DESC
+       LIMIT $6`,
+      [String(maturityMin), String(windowMin), winMult, minPicks, minHitRate, limit]
+    );
+    return (result.rows as Array<{ wallet: string; picks: number; hit_rate: number }>).map((r) => ({
+      wallet: r.wallet,
+      picks: Number(r.picks),
+      hitRate: Number(r.hit_rate),
+    }));
   }
 
   async upsertWallet(profile: WalletProfile): Promise<void> {
@@ -343,6 +402,7 @@ export class RuntimeRepo {
       insider_concentration: number;
       lifecycle: TokenState["lifecycle"];
       last_trade_at?: string | null;
+      smart_money_buys?: number;
       continuation?: number;
       migration?: number;
       rug?: number;
@@ -354,7 +414,7 @@ export class RuntimeRepo {
       score?: number;
     }>(
       `SELECT t.mint, COALESCE(t.name, '') AS name, t.symbol, t.dev_wallet, t.created_at, t.current_mc, t.ath_mc, t.holder_count, t.buy_count, t.sell_count, t.volume,
-              t.smart_wallet_count, t.smart_wallet_net_flow, t.insider_concentration, t.lifecycle, t.last_trade_at,
+              t.smart_wallet_count, t.smart_wallet_net_flow, t.insider_concentration, t.lifecycle, t.last_trade_at, t.smart_money_buys,
               ph.continuation, ph.migration, ph.rug, ph.hit25k_before10k, ph.hit100k_before25k, ph.hit30k_before10k, ph.local_top, ph.local_top_within_n_minutes, ph.score
        FROM tokens t
        LEFT JOIN LATERAL (
@@ -405,7 +465,8 @@ export class RuntimeRepo {
       earlyUniqueBuyers: 0,
       earlyNetSol: 0,
       peakAt: r.created_at,
-      lastTradeAt: r.last_trade_at ?? r.created_at
+      lastTradeAt: r.last_trade_at ?? r.created_at,
+      smartMoneyBuys: Number(r.smart_money_buys ?? 0)
       } as TokenState;
     });
   }

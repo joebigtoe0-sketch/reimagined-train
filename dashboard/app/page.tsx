@@ -246,6 +246,7 @@ function TerminalView({ tokens, search, onSelectToken }: {
   const [minProb, setMinProb] = useState(0);
   const [onlySmart, setOnlySmart] = useState(false);
   const [onlyRunners, setOnlyRunners] = useState(false);
+  const [onlyAlpha, setOnlyAlpha] = useState(false);
 
   const sorted = useMemo(() => {
     let arr = tokens.filter(t => {
@@ -254,6 +255,7 @@ function TerminalView({ tokens, search, onSelectToken }: {
       if (t.probabilityContinuation < minProb) return false;
       if (onlySmart && t.smartWalletCount < 2) return false;
       if (onlyRunners && (t.entryScore ?? 0) < 45) return false;
+      if (onlyAlpha && (t.smartMoneyBuys ?? 0) < 1) return false;
       if (search) {
         const s = search.toLowerCase();
         if (!t.symbol.toLowerCase().includes(s) && !t.name.toLowerCase().includes(s) && !t.mint.toLowerCase().includes(s)) return false;
@@ -270,7 +272,7 @@ function TerminalView({ tokens, search, onSelectToken }: {
       return sortDir === "asc" ? av - bv : bv - av;
     });
     return arr;
-  }, [tokens, sortKey, sortDir, phaseFilter, minProb, onlySmart, onlyRunners, search]);
+  }, [tokens, sortKey, sortDir, phaseFilter, minProb, onlySmart, onlyRunners, onlyAlpha, search]);
 
   const setSort = (k: SortKey) => {
     if (sortKey === k) setSortDir(d => d === "asc" ? "desc" : "asc");
@@ -315,6 +317,12 @@ function TerminalView({ tokens, search, onSelectToken }: {
             border: "1px solid " + (onlyRunners ? "var(--green-dim)" : "var(--border)"),
             fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em",
           }}>{onlyRunners ? "✓" : "·"} runners</button>
+          <button onClick={() => setOnlyAlpha(s => !s)} style={{
+            padding: "3px 9px", background: onlyAlpha ? "var(--green-bg)" : "transparent",
+            color: onlyAlpha ? "var(--green)" : "var(--text-3)",
+            border: "1px solid " + (onlyAlpha ? "var(--green-dim)" : "var(--border)"),
+            fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em",
+          }}>{onlyAlpha ? "✓" : "·"} ★ smart money</button>
           <div className="spacer" />
           <span className="muted">{sorted.length}/{tokens.length}</span>
           <span style={{ color: "var(--green)" }}>live <span className="dot dot-green pulse" /></span>
@@ -356,6 +364,12 @@ function TerminalView({ tokens, search, onSelectToken }: {
                     <td>
                       <div className="tick">
                         <span className="sym">${t.symbol}</span>
+                        {(t.smartMoneyBuys ?? 0) > 0 && (
+                          <span
+                            title={`${t.smartMoneyBuys} proven-predictive wallet${(t.smartMoneyBuys ?? 0) > 1 ? "s" : ""} bought this`}
+                            style={{ color: "var(--green)", fontWeight: 700, fontSize: 10, letterSpacing: 0.3 }}
+                          >★{(t.smartMoneyBuys ?? 0) > 1 ? `×${t.smartMoneyBuys}` : ""} SMART</span>
+                        )}
                         <span className="ca">{t.name && t.name !== t.symbol ? t.name.slice(0, 14) : ""}</span>
                       </div>
                     </td>

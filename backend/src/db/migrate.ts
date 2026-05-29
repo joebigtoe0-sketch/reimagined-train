@@ -25,8 +25,10 @@ export async function runStartupMigrations(): Promise<void> {
     `ALTER TABLE raw_events ADD COLUMN IF NOT EXISTS side TEXT`,
     `ALTER TABLE raw_events ADD COLUMN IF NOT EXISTS token_amount NUMERIC`,
     `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS last_trade_at TIMESTAMPTZ`,
+    `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS smart_money_buys INTEGER NOT NULL DEFAULT 0`,
     `CREATE INDEX IF NOT EXISTS idx_trades_wallet_ts ON trades (wallet, ts DESC)`,
-    `CREATE INDEX IF NOT EXISTS idx_tokens_last_trade ON tokens (last_trade_at DESC NULLS LAST)`
+    `CREATE INDEX IF NOT EXISTS idx_tokens_last_trade ON tokens (last_trade_at DESC NULLS LAST)`,
+    `CREATE INDEX IF NOT EXISTS idx_trades_mint_ts ON trades (mint, ts ASC)`
   ];
   for (const stmt of incremental) {
     await pool.query(stmt);
