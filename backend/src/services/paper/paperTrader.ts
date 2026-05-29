@@ -1,15 +1,19 @@
-import type { TokenState } from "../../types.js";
+import type { CanonicalEvent, TokenState } from "../../types.js";
 
 /**
- * Paper trading bot. Trades the live ACTION signal with fake money so we can
- * watch how the signals would actually perform — no real funds at risk.
+ * Paper trading bot. Trades the live signals with fake money so we can watch how
+ * they would actually perform — no real funds at risk.
  *
- *  BUY            → open a fixed-size position (once per mint, no re-entry)
- *  TRIM/EXIT/DEAD → close the position (lock profit / cut loss)
- *  HOLD/WATCH     → keep holding
+ * ENTRY: open a fixed-size position when ACTION = BUY (once per mint).
+ * EXIT : the validated "smart_combo / tp3" rule from scripts/exitsim.mjs — the
+ *        best exit our backtests found. Sell on whichever fires first:
+ *          • take-profit  — market cap reaches TP_MULT × entry
+ *          • whale dump   — a single sell >= BIG_SELL_SOL
+ *          • sell-flip    — sells outnumber buys in the last FLIP_WINDOW
+ *          • momentum stall — no buy for STALL_MS
+ *          • dead         — token flagged dead/failed
  *
- * Position value is marked to market from the token's current market cap
- * (value = solIn × currentMc / entryMc). A small haircut models fees/slippage.
+ * Position value is marked to market from the token's current market cap.
  */
 
 export interface PaperPosition {
@@ -58,6 +62,22 @@ const STARTING_BALANCE = 10; // SOL
 const BET_SIZE = 0.5; // SOL per position
 const MAX_OPEN = 12;
 const EXIT_FEE = 0.98; // round-trip slippage/fee haircut on exit
+// smart_combo / tp3 exit parameters (from exitsim.mjs).
+const TP_MULT = 3.0;
+const BIG_SELL_SOL = 1.5;
+const FLIP_WINDOW_MS = 30_000;
+const STALL_MS = 45_000;
+
+interface Pos {
+  mint: string;
+  symbol: string;
+  entryMc: number;
+  currentMc: number;
+  solIn: number;
+  entryAt: string;
+  lastBuyTs: number;
+  window: Array<{ ts: number; side: string }>;
+}
 
 export class PaperTrader {
   private enabled = false;
@@ -65,7 +85,7 @@ export class PaperTrader {
   private realizedPnl = 0;
   private wins = 0;
   private losses = 0;
-  private readonly positions = new Map<string, Omit<PaperPosition, "value" | "pnlPct" | "currentMc"> & { currentMc: number }>();
+  private readonly positions = new Map<string, Pos>();
   private readonly traded = new Set<string>();
   private readonly trades: PaperTrade[] = [];
 
@@ -84,16 +104,19 @@ export class PaperTrader {
     this.trades.length = 0;
   }
 
-  /** Evaluate one token; returns true if it opened or closed a position. */
-  onToken(token: TokenState): boolean {
+  /** Tick (every few seconds): entries on BUY + time-based exits (stall/dead/TP). */
+  onToken(token: TokenState): void {
     const pos = this.positions.get(token.mint);
     if (pos) {
       if (token.marketCap > 0) pos.currentMc = token.marketCap;
-      if (token.action === "TRIM" || token.action === "EXIT" || token.action === "DEAD") {
-        this.close(token.mint, token.action);
-        return true;
+      if (token.lifecycle === "dead" || token.lifecycle === "failed" || token.action === "DEAD") {
+        this.close(token.mint, "dead");
+      } else if (pos.currentMc >= pos.entryMc * TP_MULT) {
+        this.close(token.mint, "tp");
+      } else if (Date.now() - pos.lastBuyTs > STALL_MS) {
+        this.close(token.mint, "stall");
       }
-      return false;
+      return;
     }
     if (this.enabled && token.action === "BUY" && !this.traded.has(token.mint) && token.marketCap > 0) {
       if (this.cash >= BET_SIZE && this.positions.size < MAX_OPEN) {
@@ -105,12 +128,30 @@ export class PaperTrader {
           currentMc: token.marketCap,
           solIn: BET_SIZE,
           entryAt: new Date().toISOString(),
+          lastBuyTs: Date.now(),
+          window: [],
         });
         this.traded.add(token.mint);
-        return true;
       }
     }
-    return false;
+  }
+
+  /** Per-trade: order-flow exits (take-profit / whale dump / sell-flip). */
+  onTrade(token: TokenState, event: CanonicalEvent): void {
+    const pos = this.positions.get(event.mint);
+    if (!pos) return;
+    const ts = Date.parse(event.timestamp) || Date.now();
+    if (token.marketCap > 0) pos.currentMc = token.marketCap;
+
+    if (pos.currentMc >= pos.entryMc * TP_MULT) { this.close(pos.mint, "tp"); return; }
+    if (event.side === "sell" && event.amountSol >= BIG_SELL_SOL) { this.close(pos.mint, "whale"); return; }
+
+    pos.window.push({ ts, side: event.side ?? "buy" });
+    if (event.side === "buy") pos.lastBuyTs = ts;
+    while (pos.window.length && ts - pos.window[0].ts > FLIP_WINDOW_MS) pos.window.shift();
+    let buys = 0, sells = 0;
+    for (const w of pos.window) { if (w.side === "sell") sells++; else buys++; }
+    if (buys + sells >= 4 && sells > buys) this.close(pos.mint, "sellflip");
   }
 
   private close(mint: string, reason: string): void {

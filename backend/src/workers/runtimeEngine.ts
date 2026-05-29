@@ -32,6 +32,16 @@ function randomDev(wallet: string): string {
   return `DEV_${wallet.slice(-8)}`;
 }
 
+/** Take the first n values from a Map without materializing the whole array. */
+function takeValues<K, V>(map: Map<K, V>, n: number): V[] {
+  const out: V[] = [];
+  for (const v of map.values()) {
+    out.push(v);
+    if (out.length >= n) break;
+  }
+  return out;
+}
+
 // Max tokens we keep an active (metered) trade subscription for at once.
 const MAX_TRADE_SUBSCRIPTIONS = 400;
 // A token with no observed trade within this window is considered dead and we
@@ -41,6 +51,8 @@ const ACTIVE_WINDOW_MS = 3 * 60 * 1000;
 const DEAD_AFTER_MS = 2 * 60 * 1000;
 // How often we recompute the proven-predictive ("alpha") wallet set from outcomes.
 const ALPHA_REFRESH_MS = 10 * 60 * 1000;
+// Heavy O(N) analytics (graph clustering + ML) run at most this often, not per event.
+const HEAVY_ANALYTICS_MS = 2_500;
 
 export class RuntimeEngine {
   private readonly state = new RuntimeState();
@@ -62,6 +74,7 @@ export class RuntimeEngine {
   private reaperTimer: NodeJS.Timeout | null = null;
   private alphaTimer: NodeJS.Timeout | null = null;
   private paperTimer: NodeJS.Timeout | null = null;
+  private lastHeavyAt = 0;
   private readonly paper = new PaperTrader();
   private calibration: CalibrationReport = { sampleSize: 0, brierScore: 0, precision: 0, recall: 0, driftDelta: 0 };
 
@@ -351,6 +364,7 @@ export class RuntimeEngine {
         if (this.state.events.length > 5000) this.state.events.length = 5000;
         const token = this.applyEvent(event);
         if (!token) continue; // trade on unknown mint — skip
+        if (event.type === "trade") this.paper.onTrade(token, event);
         const alerts = evaluateAlerts(token);
         for (const alert of alerts) {
           this.state.alerts.unshift(alert);
@@ -532,7 +546,7 @@ export class RuntimeEngine {
     token.devScore = dev.score;
     void this.repo.upsertDeveloper(dev);
 
-    const signals = detectMarketSignals(token, [...this.state.wallets.values()].slice(0, 150));
+    const signals = detectMarketSignals(token, takeValues(this.state.wallets, 150));
     void this.repo.upsertSignalObservation(token.mint, event.timestamp, signals);
     const scored = scoreToken(token, signals);
     this.state.tokens.set(scored.mint, scored);
@@ -556,20 +570,28 @@ export class RuntimeEngine {
     void this.repo.insertProbability(probability);
     void this.repo.upsertTokenOutcome(scored.mint, scored.athMarketCap, scored.lifecycle === "migrated");
 
-    const graph = buildWalletGraph(this.state.events.slice(0, 1200));
-    const clusterRisk = scoreClusterRisk(graph);
-    const highestClusterRisk = clusterRisk.reduce((max, c) => Math.max(max, c.insiderRisk), 0);
-    scored.insiderConcentration = Number(Math.max(scored.insiderConcentration, highestClusterRisk * 0.8).toFixed(3));
-    this.state.tokens.set(scored.mint, scored);
+    // Heavy analytics (wallet-graph clustering + ML shadow inference) are O(N)
+    // over the whole state. Running them on EVERY event makes ingestion fall
+    // behind real time as the dataset grows (the dashboard then shows stale
+    // "newest" tokens). Throttle them to run at most every HEAVY_ANALYTICS_MS;
+    // the hot path stays light so launches/trades are processed promptly.
+    const now = Date.now();
+    if (now - this.lastHeavyAt > HEAVY_ANALYTICS_MS) {
+      this.lastHeavyAt = now;
+      const graph = buildWalletGraph(this.state.events.slice(0, 1200));
+      const clusterRisk = scoreClusterRisk(graph);
+      const highestClusterRisk = clusterRisk.reduce((max, c) => Math.max(max, c.insiderRisk), 0);
+      scored.insiderConcentration = Number(Math.max(scored.insiderConcentration, highestClusterRisk * 0.8).toFixed(3));
 
-    const features = buildFeatureRows(this.listTokens().slice(0, 100), [...this.state.wallets.values()].slice(0, 200), this.state.probabilities.slice(0, 300));
-    const ml = runShadowInference(features).find((m) => m.mint === scored.mint);
-    if (ml) {
-      scored.probabilityContinuation = Math.round(scored.probabilityContinuation * 0.75 + ml.continuation * 0.25);
-      scored.probabilityMigration = Math.round(scored.probabilityMigration * 0.75 + ml.migration * 0.25);
-      scored.probabilityRug = Math.round(scored.probabilityRug * 0.75 + ml.rug * 0.25);
+      const features = buildFeatureRows(takeValues(this.state.tokens, 100), takeValues(this.state.wallets, 200), this.state.probabilities.slice(0, 300));
+      const ml = runShadowInference(features).find((m) => m.mint === scored.mint);
+      if (ml) {
+        scored.probabilityContinuation = Math.round(scored.probabilityContinuation * 0.75 + ml.continuation * 0.25);
+        scored.probabilityMigration = Math.round(scored.probabilityMigration * 0.75 + ml.migration * 0.25);
+        scored.probabilityRug = Math.round(scored.probabilityRug * 0.75 + ml.rug * 0.25);
+      }
+      this.state.tokens.set(scored.mint, scored);
     }
-    this.state.tokens.set(scored.mint, scored);
 
     return scored;
   }
