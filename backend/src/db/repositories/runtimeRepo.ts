@@ -601,12 +601,15 @@ export class RuntimeRepo {
       total_trades: number;
       realized_pnl: number;
     }>(
+      // Order by activity (most trades first), NOT by PnL — ordering by PnL and
+      // capping would only ever return the winners and hide every losing wallet.
+      // Activity gives a representative set spanning the full PnL spectrum.
       `SELECT wallet, win_rate, avg_return_multiple, confidence, category,
               avg_entry_mc, avg_exit_mc, avg_hold_minutes, migration_success_rate,
               rug_exposure_rate, total_trades, realized_pnl
        FROM wallet_scores
        WHERE total_trades > 0
-       ORDER BY realized_pnl DESC
+       ORDER BY total_trades DESC, abs(realized_pnl) DESC
        LIMIT $1`,
       [limit]
     );
