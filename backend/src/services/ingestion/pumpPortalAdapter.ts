@@ -209,12 +209,20 @@ export class PumpPortalAdapter implements IngestionSource {
   async pollTrades(trackedMints: string[]): Promise<TradeInfo[]> {
     this.connect();
 
-    // Subscribe to trades for any newly tracked mints (metered, needs a key).
+    // Reconcile trade subscriptions with the desired active set (metered, needs
+    // a key). Subscribe to new mints, unsubscribe from ones that aged out so we
+    // don't keep paying for trades on dead tokens.
     if (env.PUMPPORTAL_API_KEY) {
+      const desired = new Set(trackedMints);
       const fresh = trackedMints.filter((m) => !this.subscribedMints.has(m));
       if (fresh.length > 0) {
         for (const m of fresh) this.subscribedMints.add(m);
         this.send({ method: "subscribeTokenTrade", keys: fresh });
+      }
+      const stale = [...this.subscribedMints].filter((m) => !desired.has(m));
+      if (stale.length > 0) {
+        for (const m of stale) this.subscribedMints.delete(m);
+        this.send({ method: "unsubscribeTokenTrade", keys: stale });
       }
     } else if (!this.warnedNoKey && trackedMints.length > 0) {
       this.warnedNoKey = true;

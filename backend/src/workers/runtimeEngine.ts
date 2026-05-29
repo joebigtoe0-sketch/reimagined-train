@@ -30,6 +30,9 @@ function randomDev(wallet: string): string {
   return `DEV_${wallet.slice(-8)}`;
 }
 
+// Max tokens we keep an active (metered) trade subscription for at once.
+const MAX_TRADE_SUBSCRIPTIONS = 400;
+
 export class RuntimeEngine {
   private readonly state = new RuntimeState();
   private readonly queue = new EventQueue();
@@ -212,9 +215,13 @@ export class RuntimeEngine {
     // Track the most-recently-launched tokens first; older tokens rarely trade
     // on the bonding curve. One query covers all of them (buys + sells).
     // Market cap is derived from the trade price (no DexScreener needed).
+    // Cap active trade subscriptions to the most-recent tokens. PumpPortal's
+    // trade stream is metered, so subscribing to every token forever would burn
+    // the budget and stall the feed. Older tokens drop off as new ones launch.
     const trackedMints = [...this.state.tokens.values()]
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-      .map((t) => t.mint);
+      .map((t) => t.mint)
+      .slice(0, MAX_TRADE_SUBSCRIPTIONS);
     if (trackedMints.length > 0) {
       const bqTrades = await this.source.pollTrades(trackedMints);
       const tradeEvents: CanonicalEvent[] = bqTrades.map((t) => ({
@@ -333,17 +340,14 @@ export class RuntimeEngine {
       token.volume += event.amountSol;
       if (event.side === "buy") {
         token.buyCount += 1;
-        token.holderCount += 1;
-        token.smartWalletNetFlow += 0.4;
+        token.smartWalletNetFlow += event.amountSol;
       } else {
         token.sellCount += 1;
-        token.holderCount = Math.max(1, token.holderCount - 1);
-        token.smartWalletNetFlow -= 0.35;
+        token.smartWalletNetFlow -= event.amountSol;
       }
     }
     if (event.type === "migration") token.lifecycle = "migrated";
     if (event.type === "funding" || event.type === "transfer") token.insiderConcentration = Math.min(1, token.insiderConcentration + 0.01);
-    token.smartWalletCount = Math.max(0, token.smartWalletCount + (event.type === "trade" && event.side === "buy" ? 1 : 0));
 
     // Wallet stats are derived only from real trades, so every wallet starts
     // at zero and only moves on observed buys/sells.
@@ -354,6 +358,19 @@ export class RuntimeEngine {
           if (!participant || participant === event.wallet || participant === "UNKNOWN_WALLET") continue;
           this.updateWallet(participant, { ...event, wallet: participant });
         }
+      }
+
+      // Holder + smart-wallet counts are derived from real open positions
+      // (wallets currently holding the token), not naive per-trade counters.
+      const holders = this.state.tokenHolders.get(event.mint);
+      if (holders) {
+        token.holderCount = holders.size;
+        let smart = 0;
+        for (const holder of holders) {
+          const category = this.state.wallets.get(holder)?.category;
+          if (category === "elite_early" || category === "continuation") smart += 1;
+        }
+        token.smartWalletCount = smart;
       }
     }
 
@@ -411,7 +428,20 @@ export class RuntimeEngine {
       account = createWalletAccount(wallet);
       this.state.walletAccounts.set(wallet, account);
     }
+    const heldBefore = (account.positions.get(event.mint)?.tokens ?? 0) > 0;
     applyEventToAccount(account, event);
+    const heldAfter = (account.positions.get(event.mint)?.tokens ?? 0) > 0;
+
+    if (event.type === "trade") {
+      let holders = this.state.tokenHolders.get(event.mint);
+      if (!holders) {
+        holders = new Set();
+        this.state.tokenHolders.set(event.mint, holders);
+      }
+      if (!heldBefore && heldAfter) holders.add(wallet);
+      else if (heldBefore && !heldAfter) holders.delete(wallet);
+    }
+
     const profile = deriveWalletProfile(account);
     this.state.wallets.set(wallet, profile);
     void this.repo.upsertWallet(profile);
