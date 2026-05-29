@@ -9,10 +9,7 @@ import { replayTokenTimeline } from "../services/backtest/replayEngine.js";
 import { buildWalletGraph } from "../services/graph/walletGraph.js";
 import { scoreClusterRisk } from "../services/graph/clusterRisk.js";
 import { HeliusAdapter } from "../services/ingestion/heliusAdapter.js";
-import { PumpFunAdapter } from "../services/ingestion/pumpFunAdapter.js";
-import { DexScreenerAdapter } from "../services/ingestion/dexScreenerAdapter.js";
 import { BitqueryAdapter } from "../services/ingestion/bitqueryAdapter.js";
-import { enqueueMeta } from "../services/ingestion/tokenMetadata.js";
 import { updateDeveloperProfile } from "../services/intelligence/developerIntelligence.js";
 import { updateWalletProfile } from "../services/intelligence/walletIntelligence.js";
 import { buildFeatureRows } from "../services/ml/featurePipeline.js";
@@ -34,9 +31,9 @@ export class RuntimeEngine {
   private readonly queue = new EventQueue();
   private readonly queueAdapter = new KafkaReadyQueueAdapter(new RedisStreamsQueueAdapter(this.queue));
   private readonly analyticsSink = new ClickHouseReadySink(new LocalAnalyticsSink());
+  // HeliusAdapter is kept only as an in-memory discovery tracker for coverage
+  // stats (it makes no network calls anymore). Bitquery is the sole data source.
   private readonly heliusAdapter = new HeliusAdapter();
-  private readonly pumpFunAdapter = new PumpFunAdapter();
-  private readonly dexScreener = new DexScreenerAdapter();
   private readonly bitquery = new BitqueryAdapter();
   private readonly repo: RuntimeRepo;
   private ingestTimer: NodeJS.Timeout | null = null;
@@ -193,12 +190,17 @@ export class RuntimeEngine {
       }
     }
 
-    // ── Step 2: Bitquery → live trades for tracked mints ────────────────────
-    const trackedMints = [...this.state.tokens.keys()];
+    // ── Step 2: Bitquery → live trades for tracked mints (bonding-curve feed) ─
+    // Track the most-recently-launched tokens first; older tokens rarely trade
+    // on the bonding curve. One query covers all of them (buys + sells).
+    // Market cap is derived from the trade price (no DexScreener needed).
+    const trackedMints = [...this.state.tokens.values()]
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .map((t) => t.mint);
     if (trackedMints.length > 0) {
       const bqTrades = await this.bitquery.pollTrades(trackedMints);
       const tradeEvents: CanonicalEvent[] = bqTrades.map((t) => ({
-        id: `bq-trade:${t.signature}:${t.traderWallet}`,
+        id: `bq-trade:${t.signature}:${t.mint}:${t.side}`,
         source: "helius" as const,
         type: "trade" as const,
         mint: t.mint,
@@ -206,30 +208,11 @@ export class RuntimeEngine {
         timestamp: t.timestamp,
         signature: t.signature,
         amountSol: t.amountSol,
-        marketCap: 0,
+        marketCap: t.marketCap,
         side: t.side,
-        participants: [t.traderWallet]
+        participants: t.traderWallet ? [t.traderWallet] : []
       }));
       if (tradeEvents.length > 0) await this.queueAdapter.publish(tradeEvents);
-    }
-
-    // ── Step 3: DexScreener → refresh market cap for active tokens ──────────
-    const activeMints = [...this.state.tokens.keys()].slice(0, 50);
-    const staleMints = this.dexScreener.filterStale(activeMints);
-    if (staleMints.length > 0) {
-      const mcData = await this.dexScreener.fetchBatch(staleMints);
-      this.dexScreener.markFetched(staleMints);
-      for (const [mint, data] of mcData) {
-        const token = this.state.tokens.get(mint);
-        if (token && data.marketCapUsd > 0) {
-          token.marketCap = data.marketCapUsd;
-          token.athMarketCap = Math.max(token.athMarketCap, data.marketCapUsd);
-          token.buyCount = token.buyCount + data.buys24h;
-          token.sellCount = token.sellCount + data.sells24h;
-          this.state.tokens.set(mint, token);
-          void this.repo.upsertToken(token);
-        }
-      }
     }
 
     await this.repo.checkpoint("ingestion-worker", new Date().toISOString());
@@ -317,18 +300,11 @@ export class RuntimeEngine {
       token.devWallet = inferredDev;
     }
 
-    // Fetch on-chain name/symbol from DAS only if we don't already have a real name
-    // (Pump.fun API gives us the name directly, so this is a fallback only).
-    if (token.name.startsWith("Token ") || token.symbol.length <= 4) {
-      enqueueMeta(event.mint, (meta) => {
-        const t = this.state.tokens.get(meta.mint);
-        if (t) {
-          t.name = meta.name;
-          t.symbol = meta.symbol;
-          this.state.tokens.set(meta.mint, t);
-          void this.repo.upsertToken(t);
-        }
-      });
+    // Bitquery supplies the real name/symbol on the launch event, so no
+    // separate metadata lookup is needed. Patch in case a real name arrived later.
+    if (existing && metaName && token.name.startsWith("Token ")) {
+      token.name = metaName;
+      token.symbol = metaSymbol || token.symbol;
     }
 
     token.marketCap = event.marketCap > 0 ? event.marketCap : token.marketCap;

@@ -44,9 +44,13 @@ export interface BitqueryTrade {
   side: "buy" | "sell";
   amountSol: number;
   priceUsd: number;
+  marketCap: number; // priceUsd * 1B supply (pump tokens always have 1B supply)
   signature: string;
   timestamp: string;
 }
+
+// Pump.fun tokens always mint exactly 1,000,000,000 tokens.
+const PUMP_TOKEN_SUPPLY = 1_000_000_000;
 
 // ─── GraphQL queries ────────────────────────────────────────────────────────
 
@@ -95,36 +99,36 @@ query NewPumpTokens($since: DateTime) {
 }
 `;
 
+// Trades use a short rolling window + signature dedup (same indexing-delay
+// reasoning as launches). DEXTradeByTokens is token-centric, so a single query
+// captures BOTH buys and sells for every tracked mint — and the trader wallet,
+// USD price, and SOL amount all come back cleanly.
+const TRADE_LOOKBACK_MS = 45_000;
+
 const RECENT_TRADES_QUERY = `
 query PumpTrades($since: DateTime, $mints: [String!]) {
   Solana {
-    DEXTrades(
+    DEXTradeByTokens(
       where: {
         Trade: {
+          Currency: { MintAddress: { in: $mints } }
           Dex: { ProtocolName: { is: "pump" } }
-          Buy: { Currency: { MintAddress: { in: $mints } } }
+          Price: { gt: 0 }
         }
         Transaction: { Result: { Success: true } }
         Block: { Time: { since: $since } }
       }
       orderBy: { descending: Block_Time }
-      limit: { count: 200 }
+      limit: { count: 1000 }
     ) {
       Block { Time }
       Transaction { Signature }
       Trade {
-        Buy {
-          Amount
-          Account { Address }
-          Currency { MintAddress Symbol Name }
-          Price
-        }
-        Sell {
-          Amount
-          Account { Address }
-          Currency { MintAddress }
-          PriceInUSD
-        }
+        Account { Address }
+        Side { Type Amount }
+        Currency { MintAddress }
+        PriceInUSD
+        Amount
       }
     }
   }
@@ -136,7 +140,6 @@ query PumpTrades($since: DateTime, $mints: [String!]) {
 export class BitqueryAdapter {
   private seenMints = new Set<string>();
   private seenTradeSigs = new Set<string>();
-  private lastTradePollAt: Date = new Date(Date.now() - 60_000);
   private initialized = false;
   private _verified = false;
 
@@ -273,63 +276,71 @@ export class BitqueryAdapter {
     }
   }
 
-  /** Poll recent trades for a set of tracked mints. */
+  /**
+   * Poll recent trades for a set of tracked mints (the bonding-curve feed).
+   *
+   * Uses a single token-centric query over a short rolling window. Captures
+   * every buy and sell for every passed mint, with the trader wallet and the
+   * token's USD price (→ market cap). Dedup by signature+mint+side so re-fetched
+   * rows from the overlapping window aren't double-counted.
+   */
   async pollTrades(trackedMints: string[]): Promise<BitqueryTrade[]> {
     if (!this.available || trackedMints.length === 0) return [];
 
-    const since = this.lastTradePollAt.toISOString();
-    const mints = trackedMints.slice(0, 50); // keep query size reasonable
+    const since = new Date(Date.now() - TRADE_LOOKBACK_MS).toISOString();
+    const mints = trackedMints.slice(0, 200); // engine passes most-recent first
 
     try {
       const data = await this.query<{
         Solana: {
-          DEXTrades: Array<{
+          DEXTradeByTokens: Array<{
             Block: { Time: string };
             Transaction: { Signature: string };
             Trade: {
-              Buy: { Amount: number; Account: { Address: string }; Currency: { MintAddress: string }; Price: number };
-              Sell: { Amount: number; Account: { Address: string }; Currency: { MintAddress: string }; PriceInUSD: number };
+              Account: { Address: string };
+              Side: { Type: string; Amount: number };
+              Currency: { MintAddress: string };
+              PriceInUSD: number;
+              Amount: number;
             };
           }>;
         };
       }>(RECENT_TRADES_QUERY, { since, mints });
 
-      this.lastTradePollAt = new Date();
-
-      const trades = data?.Solana?.DEXTrades ?? [];
+      const trades = data?.Solana?.DEXTradeByTokens ?? [];
       const results: BitqueryTrade[] = [];
 
       for (const t of trades) {
+        const trade = t.Trade;
+        const mint = trade?.Currency?.MintAddress;
         const sig = t.Transaction?.Signature;
-        if (!sig || this.seenTradeSigs.has(sig)) continue;
-        this.seenTradeSigs.add(sig);
+        if (!mint || !sig) continue;
 
-        const buy = t.Trade?.Buy;
-        const sell = t.Trade?.Sell;
-        const mint = buy?.Currency?.MintAddress ?? sell?.Currency?.MintAddress;
-        if (!mint) continue;
+        const side: "buy" | "sell" = (trade.Side?.Type ?? "").toLowerCase() === "buy" ? "buy" : "sell";
+        const dedupKey = `${sig}:${mint}:${side}`;
+        if (this.seenTradeSigs.has(dedupKey)) continue;
+        this.seenTradeSigs.add(dedupKey);
 
-        // Determine side: if buyer's currency is the token → it's a buy
-        const isBuy = buy?.Currency?.MintAddress === mint;
-        const trader = isBuy ? buy?.Account?.Address : sell?.Account?.Address;
-
+        const priceUsd = trade.PriceInUSD ?? 0;
         results.push({
           mint,
-          traderWallet: trader ?? "",
-          side: isBuy ? "buy" : "sell",
-          amountSol: isBuy ? (sell?.Amount ?? 0) : (buy?.Amount ?? 0),
-          priceUsd: sell?.PriceInUSD ?? 0,
+          traderWallet: trade.Account?.Address ?? "",
+          side,
+          amountSol: trade.Side?.Amount ?? 0,
+          priceUsd,
+          marketCap: priceUsd > 0 ? Math.round(priceUsd * PUMP_TOKEN_SUPPLY) : 0,
           signature: sig,
           timestamp: t.Block?.Time ?? new Date().toISOString()
         });
       }
 
-      if (this.seenTradeSigs.size > 50_000) {
-        this.seenTradeSigs = new Set([...this.seenTradeSigs].slice(-25_000));
+      if (this.seenTradeSigs.size > 80_000) {
+        this.seenTradeSigs = new Set([...this.seenTradeSigs].slice(-40_000));
       }
 
       return results;
-    } catch {
+    } catch (err) {
+      console.error("[Bitquery] pollTrades error:", err instanceof Error ? err.message : err);
       return [];
     }
   }
