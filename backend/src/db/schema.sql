@@ -202,10 +202,7 @@ EXCEPTION
 END
 $$;
 
-CREATE INDEX IF NOT EXISTS idx_snapshots_mint_ts ON token_snapshots (mint, ts DESC);
-CREATE INDEX IF NOT EXISTS idx_tokens_dev ON tokens (dev_wallet);
-CREATE INDEX IF NOT EXISTS idx_raw_events_mint_ts ON raw_events (mint, ts DESC);
-CREATE INDEX IF NOT EXISTS idx_trades_mint_ts ON trades (mint, ts DESC);
-CREATE INDEX IF NOT EXISTS idx_trades_wallet_ts ON trades (wallet, ts DESC);
-CREATE INDEX IF NOT EXISTS idx_signal_obs_mint_ts ON signal_observations (mint, ts DESC);
-CREATE INDEX IF NOT EXISTS idx_positions_wallet ON wallet_token_positions (wallet);
+-- NOTE: indexes are intentionally NOT created here. On large tables a
+-- non-concurrent CREATE INDEX takes minutes and locks writes, which blocks
+-- boot and fails the healthcheck. They are created CONCURRENTLY in the
+-- background after the server starts listening (see runIndexMigrations()).

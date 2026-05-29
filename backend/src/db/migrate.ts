@@ -18,20 +18,47 @@ export async function runStartupMigrations(): Promise<void> {
   const sql = fs.readFileSync(schemaPath, "utf8");
   await pool.query(sql);
 
-  // Incremental column additions that are safe to re-run
+  // Incremental column additions that are safe to re-run. These are metadata-only
+  // (or fast) on Postgres 11+, so they're cheap to run on every boot.
   const incremental: string[] = [
     `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE trades ADD COLUMN IF NOT EXISTS token_amount NUMERIC NOT NULL DEFAULT 0`,
     `ALTER TABLE raw_events ADD COLUMN IF NOT EXISTS side TEXT`,
     `ALTER TABLE raw_events ADD COLUMN IF NOT EXISTS token_amount NUMERIC`,
     `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS last_trade_at TIMESTAMPTZ`,
-    `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS smart_money_buys INTEGER NOT NULL DEFAULT 0`,
-    `CREATE INDEX IF NOT EXISTS idx_trades_wallet_ts ON trades (wallet, ts DESC)`,
-    `CREATE INDEX IF NOT EXISTS idx_tokens_last_trade ON tokens (last_trade_at DESC NULLS LAST)`,
-    `CREATE INDEX IF NOT EXISTS idx_trades_mint_ts ON trades (mint, ts ASC)`
+    `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS smart_money_buys INTEGER NOT NULL DEFAULT 0`
   ];
   for (const stmt of incremental) {
     await pool.query(stmt);
+  }
+}
+
+// Indexes are created CONCURRENTLY so they never lock writes, and OFF the boot
+// path so a slow build on a large table can't block app.listen / the healthcheck.
+// CONCURRENTLY cannot run in a transaction, so each runs as its own statement.
+const INDEX_STATEMENTS: string[] = [
+  `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_snapshots_mint_ts ON token_snapshots (mint, ts DESC)`,
+  `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_tokens_dev ON tokens (dev_wallet)`,
+  `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_raw_events_mint_ts ON raw_events (mint, ts DESC)`,
+  `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_trades_mint_ts ON trades (mint, ts ASC)`,
+  `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_trades_wallet_ts ON trades (wallet, ts DESC)`,
+  `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_signal_obs_mint_ts ON signal_observations (mint, ts DESC)`,
+  `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_positions_wallet ON wallet_token_positions (wallet)`,
+  `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_tokens_last_trade ON tokens (last_trade_at DESC NULLS LAST)`
+];
+
+/**
+ * Builds indexes in the background after the server is already listening.
+ * Fire-and-forget: errors are logged per-statement and never crash the app.
+ */
+export async function runIndexMigrations(): Promise<void> {
+  const pool = getDbPool();
+  for (const stmt of INDEX_STATEMENTS) {
+    try {
+      await pool.query(stmt);
+    } catch (err) {
+      console.warn("[migrate] index build skipped:", err instanceof Error ? err.message : err);
+    }
   }
 }
 

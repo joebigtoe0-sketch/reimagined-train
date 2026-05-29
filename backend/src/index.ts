@@ -8,7 +8,7 @@ import { RuntimeRepo } from "./db/repositories/runtimeRepo.js";
 import { getDbPool } from "./db/client.js";
 import { RuntimeEngine } from "./workers/runtimeEngine.js";
 import { getMetrics } from "./services/observability/metrics.js";
-import { assertRequiredTables, runStartupMigrations } from "./db/migrate.js";
+import { assertRequiredTables, runStartupMigrations, runIndexMigrations } from "./db/migrate.js";
 import { evaluateAlerts } from "./services/alerts/alertsEngine.js";
 import type { TokenState } from "./types.js";
 
@@ -194,3 +194,9 @@ process.on("SIGINT", () => void close());
 process.on("SIGTERM", () => void close());
 
 await app.listen({ port: env.PORT, host: "0.0.0.0" });
+
+// Build indexes in the background now that we're listening and healthy. A slow
+// index build on a large table must never block boot / the healthcheck.
+if (dbPoolAvailable) {
+  void runIndexMigrations();
+}
