@@ -104,6 +104,20 @@ export class RuntimeRepo {
     );
   }
 
+  /** Mark tokens with no trade within `deadAfterMs` as dead (DB-side sweep). */
+  async markStaleTokensDead(deadAfterMs: number): Promise<number> {
+    if (!this.pool) return 0;
+    const minutes = Math.max(1, Math.round(deadAfterMs / 60_000));
+    const result = await this.pool.query(
+      `UPDATE tokens
+       SET lifecycle = 'dead'
+       WHERE lifecycle NOT IN ('dead','migrated')
+         AND COALESCE(last_trade_at, created_at) < now() - ($1 || ' minutes')::interval`,
+      [String(minutes)]
+    );
+    return (result as { rowCount?: number }).rowCount ?? 0;
+  }
+
   async upsertWallet(profile: WalletProfile): Promise<void> {
     if (!this.pool) return;
     await this.pool.query(
@@ -355,7 +369,11 @@ export class RuntimeRepo {
       [limit]
     );
 
-    return rows.map((r) => ({
+    return rows.map((r) => {
+      // Dead/rugged tokens can't grow or migrate — show those outcomes as 0
+      // even though the last stored probability row predates the death.
+      const terminal = r.lifecycle === "dead" || r.lifecycle === "failed";
+      return {
       mint: r.mint,
       name: r.name || `Token ${r.mint.slice(0, 6)}`,
       symbol: r.symbol,
@@ -371,9 +389,9 @@ export class RuntimeRepo {
       smartWalletNetFlow: Number(r.smart_wallet_net_flow ?? 0),
       devScore: 50,
       insiderConcentration: Number(r.insider_concentration ?? 0),
-      probabilityContinuation: Number(r.continuation ?? 0),
-      probabilityMigration: Number(r.migration ?? 0),
-      probabilityRug: Number(r.rug ?? 0),
+      probabilityContinuation: terminal ? 0 : Number(r.continuation ?? 0),
+      probabilityMigration: terminal ? 0 : Number(r.migration ?? 0),
+      probabilityRug: terminal ? Math.max(Number(r.rug ?? 0), 90) : Number(r.rug ?? 0),
       probabilityHit25kBefore10k: Number(r.hit25k_before10k ?? 0),
       probabilityHit100kBefore25k: Number(r.hit100k_before25k ?? 0),
       probabilityHit30kBefore10k: Number(r.hit30k_before10k ?? 0),
@@ -383,12 +401,13 @@ export class RuntimeRepo {
       lifecycle: r.lifecycle ?? "new",
       entryScore: 0,
       entrySignal: "avoid",
-      exitSignal: "accumulate",
+      exitSignal: terminal ? "dead" : "accumulate",
       earlyUniqueBuyers: 0,
       earlyNetSol: 0,
       peakAt: r.created_at,
       lastTradeAt: r.last_trade_at ?? r.created_at
-    }));
+      } as TokenState;
+    });
   }
 
   /**

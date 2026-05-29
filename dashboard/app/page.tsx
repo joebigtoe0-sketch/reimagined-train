@@ -37,17 +37,15 @@ function shortAddr(a: string): string {
   if (!a || a.length < 8) return a;
   return a.slice(0, 4) + "…" + a.slice(-4);
 }
-const DEAD_MS = 2 * 60 * 1000;
-// A token is "dead" once no trade has landed for DEAD_MS (or it migrated/failed).
+// Deadness is decided by the backend (lifecycle) so the UI never flip-flops on
+// a moving client clock. The backend reaper marks tokens dead after ~2m of no trades.
 function isDeadToken(t: TokenState): boolean {
-  if (t.lifecycle === "failed" || t.lifecycle === "migrated") return true;
-  const last = t.lastTradeAt ? new Date(t.lastTradeAt).getTime() : new Date(t.createdAt).getTime();
-  return Date.now() - last > DEAD_MS;
+  return t.lifecycle === "dead" || t.lifecycle === "failed";
 }
 
 // ─── Map real data to display phase ───────────────────────────────────────
 function toPhase(lc: TokenState["lifecycle"]): string {
-  const m: Record<string, string> = { new: "LAUNCH", accumulation: "CURVE", distribution: "CURVE", failed: "DEAD", migrated: "PUMPSWAP" };
+  const m: Record<string, string> = { new: "LAUNCH", accumulation: "CURVE", distribution: "CURVE", failed: "DEAD", migrated: "PUMPSWAP", dead: "DEAD" };
   return m[lc] ?? "CURVE";
 }
 function phaseBadge(phase: string): string {

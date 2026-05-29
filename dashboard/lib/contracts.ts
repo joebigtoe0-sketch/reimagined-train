@@ -23,7 +23,7 @@ export type TokenState = {
   devScore: number;
   insiderConcentration?: number;
   score?: number;
-  lifecycle: "new" | "accumulation" | "distribution" | "failed" | "migrated";
+  lifecycle: "new" | "accumulation" | "distribution" | "failed" | "migrated" | "dead";
   entryScore?: number;
   entrySignal?: "strong" | "moderate" | "weak" | "avoid";
   exitSignal?: "accumulate" | "hold" | "take_profit" | "exit" | "dead";

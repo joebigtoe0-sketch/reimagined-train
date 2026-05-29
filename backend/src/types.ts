@@ -35,7 +35,7 @@ export interface TokenState {
   probabilityLocalTop: number;
   probabilityLocalTopWithinNMinutes: number;
   score: number;
-  lifecycle: "new" | "accumulation" | "distribution" | "failed" | "migrated";
+  lifecycle: "new" | "accumulation" | "distribution" | "failed" | "migrated" | "dead";
   // Entry/exit intelligence (provisional, learned from early-window patterns).
   entryScore: number; // 0-100: likelihood this is an early runner
   entrySignal: "strong" | "moderate" | "weak" | "avoid";

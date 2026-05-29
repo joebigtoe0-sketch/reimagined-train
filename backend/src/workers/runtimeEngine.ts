@@ -36,6 +36,8 @@ const MAX_TRADE_SUBSCRIPTIONS = 400;
 // A token with no observed trade within this window is considered dead and we
 // stop paying to track it. New tokens count from launch (lastTradeAt=createdAt).
 const ACTIVE_WINDOW_MS = 3 * 60 * 1000;
+// No trade for this long ⇒ the token is dead (UI + probabilities reflect it).
+const DEAD_AFTER_MS = 2 * 60 * 1000;
 
 export class RuntimeEngine {
   private readonly state = new RuntimeState();
@@ -54,6 +56,7 @@ export class RuntimeEngine {
   private parseTimer: NodeJS.Timeout | null = null;
   private snapshotTimer: NodeJS.Timeout | null = null;
   private labelTimer: NodeJS.Timeout | null = null;
+  private reaperTimer: NodeJS.Timeout | null = null;
   private calibration: CalibrationReport = { sampleSize: 0, brierScore: 0, precision: 0, recall: 0, driftDelta: 0 };
 
   constructor(poolAvailable: boolean, private readonly redis: Redis | null, private readonly ingestIntervalMs: number, private readonly snapshotIntervalMs: number, repo: RuntimeRepo) {
@@ -82,17 +85,52 @@ export class RuntimeEngine {
     this.labelTimer = setInterval(() => {
       void this.repo.relabelMaturedOutcomes().catch((err) => console.warn("[label] relabel error:", err instanceof Error ? err.message : err));
     }, 60_000);
+
+    // Mark tokens with no trades for DEAD_AFTER_MS as dead (single source of
+    // truth — avoids the UI flip-flopping on a client-side clock).
+    this.reaperTimer = setInterval(() => {
+      this.reapDeadTokens(onBroadcast);
+    }, 15_000);
   }
 
   stop(): void {
     if (this.ingestTimer) clearInterval(this.ingestTimer);
     if (this.parseTimer) clearInterval(this.parseTimer);
     if (this.labelTimer) clearInterval(this.labelTimer);
+    if (this.reaperTimer) clearInterval(this.reaperTimer);
     if (this.snapshotTimer) clearInterval(this.snapshotTimer);
     this.ingestTimer = null;
     this.parseTimer = null;
     this.snapshotTimer = null;
     this.labelTimer = null;
+    this.reaperTimer = null;
+  }
+
+  /**
+   * Mark tokens that have gone quiet (no trade for DEAD_AFTER_MS) as dead. A
+   * dead token can't keep growing or migrate, so we zero those probabilities.
+   * Runs over the in-memory set (broadcasting live updates) and also sweeps the
+   * DB so tokens that aged out / survived a redeploy are labelled consistently.
+   */
+  private reapDeadTokens(onBroadcast: (type: string, payload: unknown) => void): void {
+    const now = Date.now();
+    for (const token of this.state.tokens.values()) {
+      if (token.lifecycle === "dead" || token.lifecycle === "migrated") continue;
+      const last = Date.parse(token.lastTradeAt) || Date.parse(token.createdAt) || now;
+      if (now - last <= DEAD_AFTER_MS) continue;
+      token.lifecycle = "dead";
+      token.probabilityContinuation = 0;
+      token.probabilityMigration = 0;
+      token.probabilityRug = Math.max(token.probabilityRug, 90);
+      token.exitSignal = "dead";
+      this.state.tokens.set(token.mint, token);
+      void this.repo.upsertToken(token);
+      onBroadcast("tokenUpdate", token);
+    }
+    // Sweep the DB for tokens not currently in memory (e.g. after a redeploy).
+    void this.repo.markStaleTokensDead(DEAD_AFTER_MS).catch((err) =>
+      console.warn("[reaper] DB sweep error:", err instanceof Error ? err.message : err)
+    );
   }
 
   listTokens(): TokenState[] {

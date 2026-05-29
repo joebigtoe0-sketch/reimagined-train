@@ -36,12 +36,15 @@ export function scoreToken(token: TokenState, signals?: MarketSignals): TokenSta
   const lifecycle: TokenState["lifecycle"] =
     continuation > 62 && rug < 40 ? "accumulation" : localTop > 68 ? "distribution" : migration > 72 ? "migrated" : rug > 70 ? "failed" : "new";
 
+  // A failed/rugged token can't keep growing or migrate — zero those outcomes.
+  const terminal = lifecycle === "failed";
+
   return {
     ...token,
     score,
-    probabilityContinuation: continuation,
-    probabilityMigration: migration,
-    probabilityRug: rug,
+    probabilityContinuation: terminal ? 0 : continuation,
+    probabilityMigration: terminal ? 0 : migration,
+    probabilityRug: terminal ? Math.max(rug, 90) : rug,
     probabilityHit25kBefore10k: hit25kBefore10k,
     probabilityHit100kBefore25k: hit100kBefore25k,
     probabilityHit30kBefore10k: hit30kBefore10k,
