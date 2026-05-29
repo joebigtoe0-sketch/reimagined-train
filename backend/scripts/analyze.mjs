@@ -81,16 +81,21 @@ if (rows.length === 0) {
 }
 
 // ── Derive outcomes + tidy features ─────────────────────────────────────────
+// Outcomes are measured RELATIVE TO ENTRY (max multiple) so they give signal
+// even early, when few tokens cross absolute milestones like $25k.
 const data = rows.map((r) => {
   const entryMc = Number(r.entry_mc) || Number(r.current_mc) || 0;
   const athMc = Number(r.ath_mc) || 0;
+  const currentMc = Number(r.current_mc);
   const buys = Number(r.buys);
   const sells = Number(r.sells);
   const buySol = Number(r.buy_sol);
+  const peakX = entryMc > 0 ? athMc / entryMc : 0; // best-case return from entry
+  const retained = athMc > 0 ? currentMc / athMc : 1; // fraction of ATH still held
   return {
     mint: r.mint,
     athMc,
-    currentMc: Number(r.current_mc),
+    currentMc,
     entryMc,
     buys,
     sells,
@@ -100,19 +105,20 @@ const data = rows.map((r) => {
     sellBuyRatio: buys > 0 ? sells / buys : sells > 0 ? 99 : 0,
     earlyHolders: Number(r.early_holders),
     devSells: Number(r.dev_sells),
-    multiple: entryMc > 0 ? athMc / entryMc : 0,
+    peakX,
+    retained,
     // OUTCOMES (observed):
-    success: athMc >= 25_000,
-    moonshot: entryMc > 0 && athMc / entryMc >= 5,
-    rug: athMc >= 4_000 && Number(r.current_mc) <= athMc * 0.15
+    good: peakX >= 2, // at least doubled from entry => tradeable pump
+    big: athMc >= 25_000, // crossed a real milestone
+    rug: athMc >= 4_000 && retained <= 0.25 // pumped then dumped 75%+ from peak
   };
 });
 
 const n = data.length;
 const pct = (x) => (x * 100).toFixed(1) + "%";
 const base = {
-  success: data.filter((d) => d.success).length / n,
-  moonshot: data.filter((d) => d.moonshot).length / n,
+  good: data.filter((d) => d.good).length / n,
+  big: data.filter((d) => d.big).length / n,
   rug: data.filter((d) => d.rug).length / n
 };
 
@@ -120,20 +126,25 @@ console.log("\n═════════════════════�
 console.log(` PATTERN ANALYSIS  —  ${n} matured tokens`);
 console.log(`   early window: first ${EARLY_WINDOW_MIN} min · maturity: ${MATURITY_MIN} min`);
 console.log("══════════════════════════════════════════════════════════════");
-console.log(` BASE RATES:  success(≥25k) ${pct(base.success)}   moonshot(≥5×) ${pct(base.moonshot)}   rug ${pct(base.rug)}`);
+console.log(` BASE RATES:  pump(≥2× from entry) ${pct(base.good)}   big(≥25k ATH) ${pct(base.big)}   rug(dump 75%) ${pct(base.rug)}`);
+
+// Peak-multiple distribution — how far do tokens actually run?
+const xs = [1.5, 2, 3, 5, 10];
+const dist = xs.map((x) => `≥${x}×: ${data.filter((d) => d.peakX >= x).length}`).join("   ");
+console.log(` PEAK MULTIPLE (ATH/entry):  ${dist}   (of ${n})`);
 
 function liftTable(title, valueFn, buckets) {
   console.log(`\n── ${title} ───────────────────────────────────────────`);
-  console.log("  bucket".padEnd(20) + "n".padStart(6) + "  success   (lift)   rug      (lift)");
+  console.log("  bucket".padEnd(20) + "n".padStart(6) + "   pump≥2×  (lift)   rug      (lift)");
   for (const [label, pred] of buckets) {
     const subset = data.filter((d) => pred(valueFn(d)));
     if (subset.length === 0) {
       console.log("  " + label.padEnd(18) + "0".padStart(6) + "     —");
       continue;
     }
-    const s = subset.filter((d) => d.success).length / subset.length;
+    const s = subset.filter((d) => d.good).length / subset.length;
     const r = subset.filter((d) => d.rug).length / subset.length;
-    const sLift = base.success > 0 ? (s / base.success).toFixed(2) + "×" : "—";
+    const sLift = base.good > 0 ? (s / base.good).toFixed(2) + "×" : "—";
     const rLift = base.rug > 0 ? (r / base.rug).toFixed(2) + "×" : "—";
     console.log(
       "  " + label.padEnd(18) + String(subset.length).padStart(6) + "   " + pct(s).padStart(6) + "  " + sLift.padStart(6) + "   " + pct(r).padStart(6) + "  " + rLift.padStart(6)
@@ -195,6 +206,6 @@ liftTable("Dev sold in first 5m?", (d) => d.devSells, [
 ]);
 
 console.log("\nNote: 'lift' >1 means that bucket is more likely than average to hit the outcome.");
-console.log("Success = reached ≥$25k ATH · Rug = collapsed to ≤15% of ATH (ATH ≥ $4k).\n");
+console.log("pump≥2× = ATH reached >=2x entry MC · rug = dumped to <=25% of ATH (ATH >= $4k).\n");
 
 await client.end();
