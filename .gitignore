@@ -9,3 +9,5 @@ backend/dist/
 .DS_Store
 *.tsbuildinfo
 **/*.tsbuildinfo
+backend/exports/
+exports/
