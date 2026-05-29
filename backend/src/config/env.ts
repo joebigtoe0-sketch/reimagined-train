@@ -24,7 +24,13 @@ const envSchema = z.object({
   // requires an API key + a linked wallet funded with >= 0.02 SOL.
   PUMPPORTAL_API_KEY: z.string().optional(),
   // PumpPortal reports market cap in SOL; convert to USD with this estimate.
-  SOL_USD_ESTIMATE: z.coerce.number().default(150)
+  SOL_USD_ESTIMATE: z.coerce.number().default(150),
+  // Drop Pump.fun "Mayhem Mode" launches (Token-2022 mints with an AI trading
+  // agent). Detected on-chain via the mint's owner program.
+  FILTER_MAYHEM: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((v) => v === "true")
 });
 
 export const env = envSchema.parse(process.env);

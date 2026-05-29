@@ -21,7 +21,8 @@ import type { IngestionSource, LaunchInfo, TradeInfo } from "./ingestionSource.j
 
 const BASE_URL = "wss://pumpportal.fun/api/data";
 const PUMP_TOKEN_SUPPLY = 1_000_000_000;
-const RECONNECT_DELAY_MS = 5_000;
+const RECONNECT_DELAY_MS = 3_000;
+const HEARTBEAT_MS = 30_000;
 
 interface PumpPortalMessage {
   message?: string;
@@ -48,6 +49,8 @@ export class PumpPortalAdapter implements IngestionSource {
   private seenTradeSigs = new Set<string>();
   private warnedNoKey = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private heartbeatTimer: NodeJS.Timeout | null = null;
+  private awaitingPong = false;
 
   /** Launches are free, so this provider is always usable. */
   get available(): boolean {
@@ -81,10 +84,15 @@ export class PumpPortalAdapter implements IngestionSource {
       if (this.subscribedMints.size > 0 && env.PUMPPORTAL_API_KEY) {
         this.send({ method: "subscribeTokenTrade", keys: [...this.subscribedMints] });
       }
+      this.startHeartbeat();
     });
 
     ws.on("message", (raw: Buffer | string) => {
       this.handleMessage(raw.toString());
+    });
+
+    ws.on("pong", () => {
+      this.awaitingPong = false;
     });
 
     ws.on("error", (err: Error) => {
@@ -94,9 +102,34 @@ export class PumpPortalAdapter implements IngestionSource {
     ws.on("close", () => {
       this.connecting = false;
       this.ws = null;
+      this.stopHeartbeat();
       console.warn(`[PumpPortal] WebSocket closed — reconnecting in ${RECONNECT_DELAY_MS / 1000}s`);
       this.scheduleReconnect();
     });
+  }
+
+  // Detect silent/half-open connections: if a ping goes unanswered for one
+  // interval, terminate so we reconnect instead of missing launches forever.
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.awaitingPong = false;
+    this.heartbeatTimer = setInterval(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      if (this.awaitingPong) {
+        console.warn("[PumpPortal] heartbeat timeout — terminating stale connection");
+        this.ws.terminate();
+        return;
+      }
+      this.awaitingPong = true;
+      this.ws.ping();
+    }, HEARTBEAT_MS);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
   }
 
   private scheduleReconnect(): void {

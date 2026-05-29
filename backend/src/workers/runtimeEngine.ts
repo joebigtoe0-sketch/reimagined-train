@@ -12,6 +12,7 @@ import { HeliusAdapter } from "../services/ingestion/heliusAdapter.js";
 import { BitqueryAdapter } from "../services/ingestion/bitqueryAdapter.js";
 import { PumpPortalAdapter } from "../services/ingestion/pumpPortalAdapter.js";
 import type { IngestionSource } from "../services/ingestion/ingestionSource.js";
+import { detectMayhemMints } from "../services/ingestion/mayhemFilter.js";
 import { env } from "../config/env.js";
 import { updateDeveloperProfile } from "../services/intelligence/developerIntelligence.js";
 import { updateWalletProfile } from "../services/intelligence/walletIntelligence.js";
@@ -169,7 +170,17 @@ export class RuntimeEngine {
     }
 
     // ── Step 1: new Pump.fun token launches ─────────────────────────────────
-    const bqTokens = await this.source.pollNewLaunches();
+    let bqTokens = await this.source.pollNewLaunches();
+
+    // Drop Mayhem Mode launches (Token-2022 mints with an AI trading agent).
+    if (env.FILTER_MAYHEM && bqTokens.length > 0) {
+      const mayhem = await detectMayhemMints(bqTokens.map((t) => t.mint));
+      if (mayhem.size > 0) {
+        bqTokens = bqTokens.filter((t) => !mayhem.has(t.mint));
+        console.log(`[ingest] filtered ${mayhem.size} Mayhem Mode token(s)`);
+      }
+    }
+
     for (const pt of bqTokens) {
       const launchEvent: CanonicalEvent = {
         id: `bq-launch:${pt.mint}`,
