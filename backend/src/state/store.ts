@@ -65,7 +65,13 @@ export function launchToken(): TokenState {
     probabilityLocalTop: 35,
     probabilityLocalTopWithinNMinutes: 30,
     score: 0,
-    lifecycle: "new"
+    lifecycle: "new",
+    entryScore: 0,
+    entrySignal: "avoid",
+    exitSignal: "accumulate",
+    earlyUniqueBuyers: 0,
+    earlyNetSol: 0,
+    peakAt: new Date().toISOString()
   };
 
   const scored = scoreToken(token);

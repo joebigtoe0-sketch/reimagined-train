@@ -36,6 +36,13 @@ export interface TokenState {
   probabilityLocalTopWithinNMinutes: number;
   score: number;
   lifecycle: "new" | "accumulation" | "distribution" | "failed" | "migrated";
+  // Entry/exit intelligence (provisional, learned from early-window patterns).
+  entryScore: number; // 0-100: likelihood this is an early runner
+  entrySignal: "strong" | "moderate" | "weak" | "avoid";
+  exitSignal: "accumulate" | "hold" | "take_profit" | "exit" | "dead";
+  earlyUniqueBuyers: number; // unique buyers in first 5 min
+  earlyNetSol: number; // net SOL inflow in first 5 min
+  peakAt: string; // timestamp of the all-time-high market cap
 }
 
 export interface WalletProfile {

@@ -16,6 +16,7 @@ import { detectMayhemMints } from "../services/ingestion/mayhemFilter.js";
 import { env } from "../config/env.js";
 import { updateDeveloperProfile } from "../services/intelligence/developerIntelligence.js";
 import { applyEventToAccount, createWalletAccount, deriveWalletProfile, positionRowFor } from "../services/intelligence/walletIntelligence.js";
+import { applyTradeToWindow, computeEntry, computeExit, createEarlyWindow, EARLY_WINDOW_MS } from "../services/intelligence/entryExit.js";
 import { buildFeatureRows } from "../services/ml/featurePipeline.js";
 import { runShadowInference } from "../services/ml/inference.js";
 import { updateMetrics } from "../services/observability/metrics.js";
@@ -328,7 +329,13 @@ export class RuntimeEngine {
         probabilityLocalTop: 35,
         probabilityLocalTopWithinNMinutes: 30,
         score: 0,
-        lifecycle: "new"
+        lifecycle: "new",
+        entryScore: 0,
+        entrySignal: "avoid",
+        exitSignal: "accumulate",
+        earlyUniqueBuyers: 0,
+        earlyNetSol: 0,
+        peakAt: event.timestamp
       };
 
     if (existing && inferredDev && token.devWallet.startsWith("DEV_")) {
@@ -343,7 +350,10 @@ export class RuntimeEngine {
     }
 
     token.marketCap = event.marketCap > 0 ? event.marketCap : token.marketCap;
-    token.athMarketCap = Math.max(token.athMarketCap, token.marketCap);
+    if (token.marketCap > token.athMarketCap) {
+      token.athMarketCap = token.marketCap;
+      token.peakAt = event.timestamp;
+    }
     if (event.type === "trade") {
       token.volume += event.amountSol;
       if (event.side === "buy") {
@@ -381,6 +391,22 @@ export class RuntimeEngine {
         token.smartWalletCount = smart;
       }
     }
+
+    // Entry/exit intelligence: maintain the first-5-min participation window and
+    // derive a live "should I ape / should I bail" read from observed action.
+    let win = this.state.earlyWindows.get(token.mint);
+    if (!win) {
+      win = createEarlyWindow(Date.parse(token.createdAt) || Date.now(), token.marketCap);
+      this.state.earlyWindows.set(token.mint, win);
+    }
+    if (event.type === "trade") applyTradeToWindow(win, event);
+    const entry = computeEntry(win);
+    token.entryScore = entry.entryScore;
+    token.entrySignal = entry.entrySignal;
+    token.earlyUniqueBuyers = entry.earlyUniqueBuyers;
+    token.earlyNetSol = entry.earlyNetSol;
+    const ageMinutes = (Date.now() - (Date.parse(token.createdAt) || Date.now())) / 60_000;
+    token.exitSignal = computeExit(token, win.entryMc || token.marketCap, ageMinutes);
 
     const dev = updateDeveloperProfile(this.state.developers.get(token.devWallet), event, token);
     this.state.developers.set(dev.devWallet, dev);
@@ -477,5 +503,11 @@ export class RuntimeEngine {
     await this.repo.insertTokenSnapshots(payload.tokens.map((t) => ({ ts: payload.timestamp, ...t })));
     await this.repo.checkpoint("snapshot-worker", payload.timestamp);
     updateMetrics({ websocketFreshnessMs: 250, alertDelayMs: 300 });
+
+    // Drop early-window state once well past the scoring window to bound memory.
+    const staleBefore = Date.now() - EARLY_WINDOW_MS - 60 * 60 * 1000;
+    for (const [mint, w] of this.state.earlyWindows) {
+      if (w.startMs < staleBefore) this.state.earlyWindows.delete(mint);
+    }
   }
 }

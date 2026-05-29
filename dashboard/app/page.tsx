@@ -214,7 +214,22 @@ function StatusBar({ totalTokens, totalWallets, coverage }: {
 
 // ─── TERMINAL VIEW ───────────────────────────────────────────────────────────
 type SortKey = "createdAt" | "marketCap" | "holderCount" | "probabilityContinuation"
-  | "probabilityMigration" | "probabilityRug" | "smartWalletCount" | "buyCount" | "volume";
+  | "probabilityMigration" | "probabilityRug" | "smartWalletCount" | "buyCount" | "volume" | "entryScore";
+
+const EXIT_LABEL: Record<string, string> = {
+  accumulate: "ACCUM", hold: "HOLD", take_profit: "TRIM", exit: "EXIT", dead: "DEAD"
+};
+function exitClass(sig?: string): string {
+  if (sig === "hold") return "g";
+  if (sig === "take_profit") return "a";
+  if (sig === "exit" || sig === "dead") return "r";
+  return "";
+}
+function entryClass(score: number): string {
+  if (score >= 70) return "up";
+  if (score >= 45) return "";
+  return "dim";
+}
 
 function TerminalView({ tokens, search, onSelectToken }: {
   tokens: TokenState[]; search: string; onSelectToken: (t: TokenState) => void;
@@ -224,6 +239,7 @@ function TerminalView({ tokens, search, onSelectToken }: {
   const [phaseFilter, setPhaseFilter] = useState("ALL");
   const [minProb, setMinProb] = useState(0);
   const [onlySmart, setOnlySmart] = useState(false);
+  const [onlyRunners, setOnlyRunners] = useState(false);
 
   const sorted = useMemo(() => {
     let arr = tokens.filter(t => {
@@ -231,6 +247,7 @@ function TerminalView({ tokens, search, onSelectToken }: {
       if (phaseFilter !== "ALL" && phase !== phaseFilter) return false;
       if (t.probabilityContinuation < minProb) return false;
       if (onlySmart && t.smartWalletCount < 2) return false;
+      if (onlyRunners && (t.entryScore ?? 0) < 45) return false;
       if (search) {
         const s = search.toLowerCase();
         if (!t.symbol.toLowerCase().includes(s) && !t.name.toLowerCase().includes(s) && !t.mint.toLowerCase().includes(s)) return false;
@@ -247,7 +264,7 @@ function TerminalView({ tokens, search, onSelectToken }: {
       return sortDir === "asc" ? av - bv : bv - av;
     });
     return arr;
-  }, [tokens, sortKey, sortDir, phaseFilter, minProb, onlySmart, search]);
+  }, [tokens, sortKey, sortDir, phaseFilter, minProb, onlySmart, onlyRunners, search]);
 
   const setSort = (k: SortKey) => {
     if (sortKey === k) setSortDir(d => d === "asc" ? "desc" : "asc");
@@ -286,6 +303,12 @@ function TerminalView({ tokens, search, onSelectToken }: {
             border: "1px solid " + (onlySmart ? "var(--green-dim)" : "var(--border)"),
             fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em",
           }}>{onlySmart ? "✓" : "·"} smart ≥ 2</button>
+          <button onClick={() => setOnlyRunners(s => !s)} style={{
+            padding: "3px 9px", background: onlyRunners ? "var(--green-bg)" : "transparent",
+            color: onlyRunners ? "var(--green)" : "var(--text-3)",
+            border: "1px solid " + (onlyRunners ? "var(--green-dim)" : "var(--border)"),
+            fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em",
+          }}>{onlyRunners ? "✓" : "·"} runners</button>
           <div className="spacer" />
           <span className="muted">{sorted.length}/{tokens.length}</span>
           <span style={{ color: "var(--green)" }}>live <span className="dot dot-green pulse" /></span>
@@ -307,6 +330,8 @@ function TerminalView({ tokens, search, onSelectToken }: {
                 <th onClick={() => setSort("smartWalletCount")} className={sIcon("smartWalletCount") + " right"} style={{ textAlign: "right", width: 60 }}>SMART</th>
                 <th style={{ textAlign: "right", width: 70 }}>INSIDER%</th>
                 <th style={{ width: 60 }}>DEV★</th>
+                <th onClick={() => setSort("entryScore")} className={sIcon("entryScore") + " right"} style={{ textAlign: "right", width: 64 }}>ENTRY</th>
+                <th style={{ width: 70 }}>EXIT</th>
                 <th onClick={() => setSort("probabilityContinuation")} className={sIcon("probabilityContinuation")} style={{ width: 140 }}>P(CONT) ↑</th>
                 <th onClick={() => setSort("probabilityMigration")} className={sIcon("probabilityMigration")} style={{ width: 120 }}>P(MIGR)</th>
                 <th onClick={() => setSort("probabilityRug")} className={sIcon("probabilityRug")} style={{ width: 100 }}>P(RUG)</th>
@@ -338,6 +363,8 @@ function TerminalView({ tokens, search, onSelectToken }: {
                       {insider > 0 ? (insider * 100).toFixed(0) + "%" : "—"}
                     </td>
                     <td className={`dim ${t.devScore >= 70 ? "up" : t.devScore < 35 ? "down" : ""}`} style={{ fontSize: 11 }}>{t.devScore}</td>
+                    <td className={`right ${entryClass(t.entryScore ?? 0)}`} title={`${t.earlyUniqueBuyers ?? 0} early buyers · net ${(t.earlyNetSol ?? 0).toFixed(1)} SOL`} style={{ fontWeight: 600 }}>{t.entryScore ?? 0}</td>
+                    <td><span className={`badge ${exitClass(t.exitSignal)}`}>{EXIT_LABEL[t.exitSignal ?? "accumulate"]}</span></td>
                     <td><ProbBar value={t.probabilityContinuation} /></td>
                     <td><ProbBar value={t.probabilityMigration} /></td>
                     <td><ProbBar value={t.probabilityRug} /></td>
@@ -346,7 +373,7 @@ function TerminalView({ tokens, search, onSelectToken }: {
                 );
               })}
               {sorted.length === 0 && (
-                <tr><td colSpan={16} style={{ color: "var(--text-3)", padding: "32px 10px", textAlign: "center" }}>
+                <tr><td colSpan={18} style={{ color: "var(--text-3)", padding: "32px 10px", textAlign: "center" }}>
                   {tokens.length === 0 ? "Waiting for Pump.fun launches…" : "No tokens match filters."}
                 </td></tr>
               )}

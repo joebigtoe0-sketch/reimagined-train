@@ -377,7 +377,13 @@ export class RuntimeRepo {
       probabilityLocalTop: Number(r.local_top ?? 0),
       probabilityLocalTopWithinNMinutes: Number(r.local_top_within_n_minutes ?? 0),
       score: Number(r.score ?? 0),
-      lifecycle: r.lifecycle ?? "new"
+      lifecycle: r.lifecycle ?? "new",
+      entryScore: 0,
+      entrySignal: "avoid",
+      exitSignal: "accumulate",
+      earlyUniqueBuyers: 0,
+      earlyNetSol: 0,
+      peakAt: r.created_at
     }));
   }
 

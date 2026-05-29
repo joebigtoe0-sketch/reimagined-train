@@ -23,6 +23,12 @@ export type TokenState = {
   insiderConcentration?: number;
   score?: number;
   lifecycle: "new" | "accumulation" | "distribution" | "failed" | "migrated";
+  entryScore?: number;
+  entrySignal?: "strong" | "moderate" | "weak" | "avoid";
+  exitSignal?: "accumulate" | "hold" | "take_profit" | "exit" | "dead";
+  earlyUniqueBuyers?: number;
+  earlyNetSol?: number;
+  peakAt?: string;
 };
 
 export type AlertEvent = {
