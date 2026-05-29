@@ -16,31 +16,16 @@ const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 await app.register(websocket);
 
-let dbPoolAvailable = true;
-let repo: RuntimeRepo;
-try {
-  await runStartupMigrations();
-  repo = new RuntimeRepo(getDbPool());
-  await assertRequiredTables(repo);
-  await repo.upsertAlertRule({
-    name: "continuation_drop",
-    enabled: true,
-    severity: "critical",
-    config: { continuationFloor: 38 },
-    cooldownSeconds: 60
-  });
-  await repo.upsertAlertRule({
-    name: "insider_risk",
-    enabled: true,
-    severity: "warning",
-    config: { insiderThreshold: 0.35 },
-    cooldownSeconds: 90
-  });
-} catch (error) {
-  dbPoolAvailable = false;
-  app.log.error({ err: error }, "Database unavailable, running in degraded mode");
-  repo = new RuntimeRepo(null);
-}
+// The Pg pool connects lazily, so building the repo here does NOT touch the
+// network. We intentionally do NOT run migrations before listening — a slow
+// migration/index build would block app.listen() and fail the healthcheck.
+// DB bootstrap runs in the background once the server is up (see bottom of file).
+const repo = new RuntimeRepo(getDbPool());
+
+// Never let a stray fire-and-forget DB rejection take down the process.
+process.on("unhandledRejection", (err) => {
+  app.log.warn({ err }, "unhandledRejection (ignored)");
+});
 
 let redis: Redis | null = null;
 try {
@@ -54,7 +39,7 @@ try {
 }
 
 const wsClients = new Set<WsWebSocket>();
-const engine = new RuntimeEngine(dbPoolAvailable, redis, env.INGEST_INTERVAL_MS, env.SNAPSHOT_INTERVAL_MS, repo);
+const engine = new RuntimeEngine(true, redis, env.INGEST_INTERVAL_MS, env.SNAPSHOT_INTERVAL_MS, repo);
 
 app.get("/health", async () => ({ ok: true }));
 app.get("/api/tokens", async () => {
@@ -195,8 +180,31 @@ process.on("SIGTERM", () => void close());
 
 await app.listen({ port: env.PORT, host: "0.0.0.0" });
 
-// Build indexes in the background now that we're listening and healthy. A slow
-// index build on a large table must never block boot / the healthcheck.
-if (dbPoolAvailable) {
-  void runIndexMigrations();
-}
+// DB bootstrap runs AFTER we're listening so the healthcheck can never be
+// blocked by a slow migration or index build. Everything here degrades
+// gracefully if Postgres is briefly unreachable.
+void (async () => {
+  try {
+    await runStartupMigrations();
+    await assertRequiredTables(repo);
+    await repo.upsertAlertRule({
+      name: "continuation_drop",
+      enabled: true,
+      severity: "critical",
+      config: { continuationFloor: 38 },
+      cooldownSeconds: 60
+    });
+    await repo.upsertAlertRule({
+      name: "insider_risk",
+      enabled: true,
+      severity: "warning",
+      config: { insiderThreshold: 0.35 },
+      cooldownSeconds: 90
+    });
+    app.log.info("DB bootstrap complete; building indexes in background");
+    await runIndexMigrations();
+    app.log.info("Index migrations complete");
+  } catch (error) {
+    app.log.error({ err: error }, "DB bootstrap failed — DB-backed features may be degraded");
+  }
+})();
