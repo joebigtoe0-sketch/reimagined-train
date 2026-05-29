@@ -89,6 +89,11 @@ app.get<{ Params: { wallet: string } }>("/api/wallets/:wallet/positions", async 
   const positions = await repo.listWalletPositions(request.params.wallet, 1000);
   return { wallet: request.params.wallet, positions };
 });
+app.get("/api/paper", async () => ({ paper: engine.paperState() }));
+app.post("/api/paper/start", async () => { engine.startPaper(); return { paper: engine.paperState() }; });
+app.post("/api/paper/stop", async () => { engine.stopPaper(); return { paper: engine.paperState() }; });
+app.post("/api/paper/reset", async () => { engine.resetPaper(); return { paper: engine.paperState() }; });
+
 app.get("/api/backtest/calibration", async () => ({ report: engine.calibrationReport() }));
 app.get("/api/backtest/replay", async () => ({ replay: engine.listReplay() }));
 app.get("/api/ops/metrics", async () => {

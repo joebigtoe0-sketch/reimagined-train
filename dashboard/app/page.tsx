@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, CSSProperties } from "react";
-import type { AlertEvent, AlertRule, DeveloperStat, TokenState, WalletProfile } from "../lib/contracts";
+import type { AlertEvent, AlertRule, DeveloperStat, PaperState, TokenState, WalletProfile } from "../lib/contracts";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8080";
 const WS_BASE = API_BASE.startsWith("https://")
@@ -249,8 +249,9 @@ function actionStyle(a?: string): React.CSSProperties {
   }
 }
 
-function TerminalView({ tokens, search, onSelectToken }: {
+function TerminalView({ tokens, search, onSelectToken, paper, onPaperControl }: {
   tokens: TokenState[]; search: string; onSelectToken: (t: TokenState) => void;
+  paper: PaperState | null; onPaperControl: (action: "start" | "stop" | "reset") => void;
 }): ReactElement {
   const [sortKey, setSortKey] = useState<SortKey>("createdAt");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
@@ -449,7 +450,86 @@ function TerminalView({ tokens, search, onSelectToken }: {
             {movers.length === 0 && <div className="dim" style={{ fontSize: 11, padding: 12 }}>No tokens yet</div>}
           </div>
         </div>
+        <PaperBotPanel paper={paper} onControl={onPaperControl} onSelectToken={onSelectToken} tokens={tokens} />
       </div>
+    </div>
+  );
+}
+
+// ─── PAPER TRADING BOT PANEL ─────────────────────────────────────────────────
+function PaperBotPanel({ paper, onControl, onSelectToken, tokens }: {
+  paper: PaperState | null;
+  onControl: (action: "start" | "stop" | "reset") => void;
+  onSelectToken: (t: TokenState) => void;
+  tokens: TokenState[];
+}): ReactElement {
+  const running = paper?.enabled ?? false;
+  const ret = paper?.totalReturnPct ?? 0;
+  const retColor = ret > 0 ? "var(--green)" : ret < 0 ? "var(--red)" : "var(--text-2)";
+  const openByMint = (mint: string) => tokens.find(t => t.mint === mint);
+  return (
+    <div className="panel" style={{ flex: "0 0 auto", maxHeight: "52%", display: "flex", flexDirection: "column", minHeight: 0 }}>
+      <div className="panel-hdr" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span className="title">🤖 PAPER BOT {running && <span className="dot dot-green pulse" />}</span>
+        <span style={{ fontSize: 9, color: running ? "var(--green)" : "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+          {running ? "running" : "stopped"}
+        </span>
+      </div>
+      <div className="panel-body" style={{ padding: 10, display: "flex", flexDirection: "column", gap: 8, overflow: "hidden", minHeight: 0 }}>
+        {/* controls */}
+        <div style={{ display: "flex", gap: 6 }}>
+          <button onClick={() => onControl(running ? "stop" : "start")} style={{
+            flex: 1, padding: "5px 0", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em",
+            background: running ? "var(--red)" : "var(--green)", color: running ? "#fff" : "#001b0e", border: "none", cursor: "pointer",
+          }}>{running ? "■ Stop" : "▶ Start"}</button>
+          <button onClick={() => onControl("reset")} style={{
+            padding: "5px 10px", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em",
+            background: "transparent", color: "var(--text-3)", border: "1px solid var(--border)", cursor: "pointer",
+          }}>Reset</button>
+        </div>
+        {/* equity summary */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+          <Stat label="EQUITY" value={`${(paper?.equity ?? 0).toFixed(2)}◎`} />
+          <Stat label="RETURN" value={`${ret > 0 ? "+" : ""}${ret.toFixed(1)}%`} color={retColor} />
+          <Stat label="REALIZED" value={`${(paper?.realizedPnl ?? 0) > 0 ? "+" : ""}${(paper?.realizedPnl ?? 0).toFixed(2)}◎`} color={(paper?.realizedPnl ?? 0) >= 0 ? "var(--green)" : "var(--red)"} />
+          <Stat label="CASH" value={`${(paper?.cash ?? 0).toFixed(2)}◎`} />
+          <Stat label="WIN RATE" value={paper && paper.tradeCount > 0 ? `${Math.round(paper.winRate * 100)}%` : "—"} />
+          <Stat label="TRADES" value={`${paper?.tradeCount ?? 0} (${paper?.wins ?? 0}/${paper?.losses ?? 0})`} />
+        </div>
+        {/* open positions */}
+        <div style={{ overflow: "auto", minHeight: 0, flex: 1 }}>
+          <div className="dim" style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", margin: "2px 0 4px" }}>
+            Open ({paper?.openCount ?? 0})
+          </div>
+          {(paper?.positions ?? []).map(p => (
+            <div key={p.mint} onClick={() => { const t = openByMint(p.mint); if (t) onSelectToken(t); }} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, padding: "3px 0", borderBottom: "1px solid var(--border)", cursor: "pointer" }}>
+              <span className="fg">${p.symbol}</span>
+              <span style={{ color: p.pnlPct >= 0 ? "var(--green)" : "var(--red)" }}>{p.pnlPct > 0 ? "+" : ""}{p.pnlPct.toFixed(0)}%</span>
+            </div>
+          ))}
+          {(paper?.positions ?? []).length === 0 && <div className="dim" style={{ fontSize: 10 }}>no open positions</div>}
+
+          <div className="dim" style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", margin: "8px 0 4px" }}>
+            Recent closes
+          </div>
+          {(paper?.trades ?? []).slice(0, 8).map((t, i) => (
+            <div key={t.mint + i} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, padding: "3px 0", borderBottom: "1px solid var(--border)" }}>
+              <span className="fg">${t.symbol} <span className="dim" style={{ fontSize: 9 }}>{t.reason}</span></span>
+              <span style={{ color: t.pnl >= 0 ? "var(--green)" : "var(--red)" }}>{t.pnl > 0 ? "+" : ""}{t.pnl.toFixed(2)}◎</span>
+            </div>
+          ))}
+          {(paper?.trades ?? []).length === 0 && <div className="dim" style={{ fontSize: 10 }}>no closed trades yet</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Stat({ label, value, color }: { label: string; value: string; color?: string }): ReactElement {
+  return (
+    <div style={{ background: "var(--bg-2, rgba(255,255,255,0.02))", padding: "4px 6px", border: "1px solid var(--border)" }}>
+      <div className="dim" style={{ fontSize: 8, letterSpacing: "0.08em" }}>{label}</div>
+      <div style={{ fontSize: 13, fontWeight: 600, color: color ?? "var(--text-1)" }}>{value}</div>
     </div>
   );
 }
@@ -1134,6 +1214,7 @@ export default function Home(): ReactElement {
   const [rules, setRules] = useState<AlertRule[]>([]);
   const [coverage, setCoverage] = useState<CoverageSnapshot | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
+  const [paper, setPaper] = useState<PaperState | null>(null);
   const [selectedToken, setSelectedToken] = useState<TokenState | null>(null);
   const [selectedWallet, setSelectedWallet] = useState<WalletProfile | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -1142,13 +1223,14 @@ export default function Home(): ReactElement {
   useEffect(() => {
     const load = async (): Promise<void> => {
       try {
-        const [tR, aR, ruR, cR, wR, dR] = await Promise.all([
+        const [tR, aR, ruR, cR, wR, dR, pR] = await Promise.all([
           fetch(`${API_BASE}/api/tokens`),
           fetch(`${API_BASE}/api/alerts`),
           fetch(`${API_BASE}/api/alerts/rules`),
           fetch(`${API_BASE}/api/ops/coverage`),
           fetch(`${API_BASE}/api/wallets`),
           fetch(`${API_BASE}/api/developers`),
+          fetch(`${API_BASE}/api/paper`),
         ]);
         const tj = await tR.json() as { tokens?: TokenState[] };
         const aj = await aR.json() as { alerts?: AlertEvent[] };
@@ -1156,12 +1238,14 @@ export default function Home(): ReactElement {
         const cj = await cR.json() as { coverage?: CoverageSnapshot };
         const wj = await wR.json() as { wallets?: WalletProfile[] };
         const dj = await dR.json() as { developers?: DeveloperStat[] };
+        const pj = await pR.json() as { paper?: PaperState };
         if (tj.tokens) setTokens(tj.tokens);
         if (aj.alerts) setAlerts(aj.alerts);
         setRules(ruj.rules ?? []);
         setCoverage(cj.coverage ?? null);
         if (wj.wallets) setWallets(wj.wallets);
         if (dj.developers) setDevelopers(dj.developers);
+        if (pj.paper) setPaper(pj.paper);
       } catch { /* backend may be starting */ }
     };
     void load();
@@ -1177,7 +1261,7 @@ export default function Home(): ReactElement {
       ws.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data as string) as {
-            type: string; payload?: TokenState;
+            type: string; payload?: TokenState | PaperState;
             tokens?: TokenState[]; alerts?: AlertEvent[];
           };
           if (msg.type === "bootstrap") {
@@ -1185,8 +1269,12 @@ export default function Home(): ReactElement {
             if (msg.alerts) setAlerts(msg.alerts);
             return;
           }
+          if (msg.type === "paperUpdate") {
+            if (msg.payload) setPaper(msg.payload as PaperState);
+            return;
+          }
           if (msg.type === "tokenUpdate" || msg.type === "tokenLaunch") {
-            const t = msg.payload; if (!t) return;
+            const t = msg.payload as TokenState | undefined; if (!t) return;
             setTokens(prev => {
               const next = prev.filter(x => x.mint !== t.mint);
               next.push(t);
@@ -1214,6 +1302,14 @@ export default function Home(): ReactElement {
 
   const handleSelectToken = (t: TokenState) => { setSelectedToken(t); setTab("token"); };
 
+  const paperControl = useCallback(async (action: "start" | "stop" | "reset") => {
+    try {
+      const r = await fetch(`${API_BASE}/api/paper/${action}`, { method: "POST" });
+      const j = await r.json() as { paper?: PaperState };
+      if (j.paper) setPaper(j.paper);
+    } catch { /* backend busy */ }
+  }, []);
+
   return (
     <div className="app">
       <Header search={search} setSearch={setSearch} coverage={coverage} wsConnected={wsConnected} />
@@ -1221,7 +1317,7 @@ export default function Home(): ReactElement {
 
       <div style={{ minHeight: 0, overflow: "hidden", position: "relative" }}>
         {tab === "terminal" && (
-          <TerminalView tokens={tokens} search={search} onSelectToken={handleSelectToken} />
+          <TerminalView tokens={tokens} search={search} onSelectToken={handleSelectToken} paper={paper} onPaperControl={paperControl} />
         )}
         {tab === "token" && (
           <TokenView token={selectedToken} onSelectToken={handleSelectToken} />

@@ -24,6 +24,7 @@ import { EventQueue } from "../services/queue/eventQueue.js";
 import { ClickHouseReadySink, LocalAnalyticsSink } from "../services/scale/analyticsSink.js";
 import { KafkaReadyQueueAdapter, RedisStreamsQueueAdapter } from "../services/scale/queueAdapter.js";
 import { detectMarketSignals } from "../services/signals/marketSignals.js";
+import { PaperTrader } from "../services/paper/paperTrader.js";
 import { RuntimeState } from "../state/runtimeState.js";
 import type { CanonicalEvent, ProbabilityRecord, TokenState } from "../types.js";
 
@@ -60,6 +61,8 @@ export class RuntimeEngine {
   private labelTimer: NodeJS.Timeout | null = null;
   private reaperTimer: NodeJS.Timeout | null = null;
   private alphaTimer: NodeJS.Timeout | null = null;
+  private paperTimer: NodeJS.Timeout | null = null;
+  private readonly paper = new PaperTrader();
   private calibration: CalibrationReport = { sampleSize: 0, brierScore: 0, precision: 0, recall: 0, driftDelta: 0 };
 
   constructor(poolAvailable: boolean, private readonly redis: Redis | null, private readonly ingestIntervalMs: number, private readonly snapshotIntervalMs: number, repo: RuntimeRepo) {
@@ -101,7 +104,18 @@ export class RuntimeEngine {
     this.alphaTimer = setInterval(() => {
       void this.refreshAlphaWallets();
     }, ALPHA_REFRESH_MS);
+
+    // Paper trading bot: act on live ACTION signals and mark positions to market.
+    this.paperTimer = setInterval(() => {
+      for (const token of this.state.tokens.values()) this.paper.onToken(token);
+      onBroadcast("paperUpdate", this.paper.state());
+    }, 3_000);
   }
+
+  startPaper(): void { this.paper.start(); }
+  stopPaper(): void { this.paper.stop(); }
+  resetPaper(): void { this.paper.reset(); }
+  paperState() { return this.paper.state(); }
 
   private async refreshAlphaWallets(): Promise<void> {
     try {
@@ -121,6 +135,7 @@ export class RuntimeEngine {
     if (this.labelTimer) clearInterval(this.labelTimer);
     if (this.reaperTimer) clearInterval(this.reaperTimer);
     if (this.alphaTimer) clearInterval(this.alphaTimer);
+    if (this.paperTimer) clearInterval(this.paperTimer);
     if (this.snapshotTimer) clearInterval(this.snapshotTimer);
     this.ingestTimer = null;
     this.parseTimer = null;
@@ -128,6 +143,7 @@ export class RuntimeEngine {
     this.labelTimer = null;
     this.reaperTimer = null;
     this.alphaTimer = null;
+    this.paperTimer = null;
   }
 
   /**

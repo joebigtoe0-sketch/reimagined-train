@@ -35,6 +35,48 @@ export type TokenState = {
   smartMoneyBuys?: number;
 };
 
+export type PaperPosition = {
+  mint: string;
+  symbol: string;
+  entryMc: number;
+  currentMc: number;
+  solIn: number;
+  value: number;
+  pnlPct: number;
+  entryAt: string;
+};
+
+export type PaperTrade = {
+  mint: string;
+  symbol: string;
+  solIn: number;
+  solOut: number;
+  pnl: number;
+  pnlPct: number;
+  entryMc: number;
+  exitMc: number;
+  reason: string;
+  exitAt: string;
+};
+
+export type PaperState = {
+  enabled: boolean;
+  startingBalance: number;
+  betSize: number;
+  cash: number;
+  openValue: number;
+  equity: number;
+  realizedPnl: number;
+  totalReturnPct: number;
+  openCount: number;
+  tradeCount: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  positions: PaperPosition[];
+  trades: PaperTrade[];
+};
+
 export type DeveloperStat = {
   devWallet: string;
   tokens: number;
