@@ -17,6 +17,9 @@ const envSchema = z.object({
   HELIUS_MAX_TRACKED_MINTS: z.coerce.number().default(5000),
   HELIUS_SIGNATURE_LIMIT: z.coerce.number().default(50),
   HELIUS_WEBHOOK_SECRET: z.string().optional(),
+  // Full Solana RPC URL (with key) used for on-chain checks like Mayhem Mode
+  // detection, e.g. https://solana-mainnet.g.alchemy.com/v2/<apikey>.
+  ALCHEMY_API: z.string().optional(),
   BITQUERY_API_KEY: z.string().optional(),
   // Which feed powers launch + trade ingestion. Toggle freely between providers.
   INGEST_SOURCE: z.enum(["pumpportal", "bitquery"]).default("pumpportal"),

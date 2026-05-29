@@ -18,6 +18,8 @@ const PUBLIC_RPC = "https://api.mainnet-beta.solana.com";
 const MAX_ACCOUNTS_PER_CALL = 100;
 
 function rpcUrl(): string {
+  // Prefer Alchemy (full URL incl. key) when set, then Helius, then public RPC.
+  if (env.ALCHEMY_API) return env.ALCHEMY_API;
   if (env.HELIUS_API_KEY && env.HELIUS_RPC_URL) {
     return `${env.HELIUS_RPC_URL}${env.HELIUS_API_KEY}`;
   }
