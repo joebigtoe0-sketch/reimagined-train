@@ -53,6 +53,10 @@ const DEAD_AFTER_MS = 2 * 60 * 1000;
 const ALPHA_REFRESH_MS = 10 * 60 * 1000;
 // Heavy O(N) analytics (graph clustering + ML) run at most this often, not per event.
 const HEAVY_ANALYTICS_MS = 2_500;
+// Non-critical per-token DB writes (dev/signal/probability/outcome history) are
+// persisted at most this often per token to keep DB write volume sane. The live
+// token row (upsertToken) + raw event/trade are still written every event.
+const AUX_PERSIST_MS = 4_000;
 
 export class RuntimeEngine {
   private readonly state = new RuntimeState();
@@ -75,6 +79,7 @@ export class RuntimeEngine {
   private alphaTimer: NodeJS.Timeout | null = null;
   private paperTimer: NodeJS.Timeout | null = null;
   private lastHeavyAt = 0;
+  private readonly lastAuxAt = new Map<string, number>();
   private readonly paper = new PaperTrader();
   private calibration: CalibrationReport = { sampleSize: 0, brierScore: 0, precision: 0, recall: 0, driftDelta: 0 };
 
@@ -358,17 +363,19 @@ export class RuntimeEngine {
 
     for (const event of events) {
       try {
-        await this.repo.insertEvent(event);
-        if (event.type === "trade") void this.repo.insertTrade(event);
         this.state.events.unshift(event);
         if (this.state.events.length > 5000) this.state.events.length = 5000;
         const token = this.applyEvent(event);
+        // Persistence is fire-and-forget: a slow/saturated DB must NEVER block
+        // processing or cause us to drop events (esp. launches) from the feed.
+        void this.repo.insertEvent(event);
+        if (event.type === "trade") void this.repo.insertTrade(event);
         if (!token) continue; // trade on unknown mint — skip
         if (event.type === "trade") this.paper.onTrade(token, event);
         const alerts = evaluateAlerts(token);
         for (const alert of alerts) {
           this.state.alerts.unshift(alert);
-          await this.repo.insertAlert(alert);
+          void this.repo.insertAlert(alert);
         }
         if (this.state.alerts.length > 250) this.state.alerts.length = 250;
         onBroadcast("tokenUpdate", token);
@@ -378,8 +385,8 @@ export class RuntimeEngine {
     }
 
     this.calibration = runBacktest(this.state.probabilities);
-    await this.analyticsSink.write(this.state.probabilities.slice(0, 50));
-    await this.repo.checkpoint("parser-worker", events.at(-1)?.signature ?? "");
+    void this.analyticsSink.write(this.state.probabilities.slice(0, 50));
+    void this.repo.checkpoint("parser-worker", events.at(-1)?.signature ?? "");
     updateMetrics({ scoringLatencyMs: Date.now() - start, eventsProcessed: this.state.events.length });
   }
 
@@ -389,6 +396,7 @@ export class RuntimeEngine {
     // before we started — drop them so historical tokens don't pollute the dashboard.
     const existing = this.state.tokens.get(event.mint);
     if (!existing && event.type !== "launch") return null;
+    const prevAth = existing?.athMarketCap ?? 0; // captured before any mutation below
 
     this.heliusAdapter.addDiscoveredWallet(event.wallet);
     if (event.devWallet) this.heliusAdapter.addDiscoveredWallet(event.devWallet);
@@ -541,13 +549,27 @@ export class RuntimeEngine {
       exitSignal: token.exitSignal
     });
 
+    // Per-token write throttle for non-critical history tables.
+    const auxNow = Date.now();
+    const persistAux = auxNow - (this.lastAuxAt.get(token.mint) ?? 0) > AUX_PERSIST_MS;
+    if (persistAux) {
+      this.lastAuxAt.set(token.mint, auxNow);
+      if (this.lastAuxAt.size > 50_000) {
+        let i = 0;
+        for (const k of this.lastAuxAt.keys()) {
+          this.lastAuxAt.delete(k);
+          if (++i >= 25_000) break;
+        }
+      }
+    }
+
     const dev = updateDeveloperProfile(this.state.developers.get(token.devWallet), event, token);
     this.state.developers.set(dev.devWallet, dev);
     token.devScore = dev.score;
-    void this.repo.upsertDeveloper(dev);
+    if (persistAux) void this.repo.upsertDeveloper(dev);
 
     const signals = detectMarketSignals(token, takeValues(this.state.wallets, 150));
-    void this.repo.upsertSignalObservation(token.mint, event.timestamp, signals);
+    if (persistAux) void this.repo.upsertSignalObservation(token.mint, event.timestamp, signals);
     const scored = scoreToken(token, signals);
     this.state.tokens.set(scored.mint, scored);
     void this.repo.upsertToken(scored);
@@ -567,8 +589,12 @@ export class RuntimeEngine {
     };
     this.state.probabilities.unshift(probability);
     if (this.state.probabilities.length > 5000) this.state.probabilities.length = 5000;
-    void this.repo.insertProbability(probability);
-    void this.repo.upsertTokenOutcome(scored.mint, scored.athMarketCap, scored.lifecycle === "migrated");
+    if (persistAux) void this.repo.insertProbability(probability);
+    // Outcome (ATH/migrated) is needed per token for learning — persist on the
+    // throttle, and always when a new ATH is set so peaks aren't missed.
+    if (persistAux || scored.athMarketCap > prevAth) {
+      void this.repo.upsertTokenOutcome(scored.mint, scored.athMarketCap, scored.lifecycle === "migrated");
+    }
 
     // Heavy analytics (wallet-graph clustering + ML shadow inference) are O(N)
     // over the whole state. Running them on EVERY event makes ingestion fall

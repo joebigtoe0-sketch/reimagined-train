@@ -53,12 +53,21 @@ const INDEX_STATEMENTS: string[] = [
  */
 export async function runIndexMigrations(): Promise<void> {
   const pool = getDbPool();
-  for (const stmt of INDEX_STATEMENTS) {
-    try {
-      await pool.query(stmt);
-    } catch (err) {
-      console.warn("[migrate] index build skipped:", err instanceof Error ? err.message : err);
+  // Use one dedicated client and disable statement_timeout for it — a large
+  // CONCURRENTLY build can exceed the global query timeout, and we don't want
+  // it killed. CONCURRENTLY also must not run inside a transaction block.
+  const client = await pool.connect();
+  try {
+    await client.query("SET statement_timeout = 0");
+    for (const stmt of INDEX_STATEMENTS) {
+      try {
+        await client.query(stmt);
+      } catch (err) {
+        console.warn("[migrate] index build skipped:", err instanceof Error ? err.message : err);
+      }
     }
+  } finally {
+    client.release();
   }
 }
 
