@@ -17,6 +17,7 @@ import {
   Keypair,
   VersionedTransaction,
 } from "@solana/web3.js";
+import bs58 from "bs58";
 import { env } from "../../config/env.js";
 
 const TRADE_LOCAL_URL = "https://pumpportal.fun/api/trade-local";
@@ -38,11 +39,11 @@ export class PumpPortalExecutor {
     this.keypair = (() => {
       const raw = env.LIVE_WALLET_PRIVATE_KEY;
       if (!raw) throw new Error("LIVE_WALLET_PRIVATE_KEY is not set");
-      try {
+      // Accept either a JSON byte array [n,n,...] or a standard base-58 string
+      if (raw.trimStart().startsWith("[")) {
         return Keypair.fromSecretKey(Uint8Array.from(JSON.parse(raw) as number[]));
-      } catch {
-        throw new Error("LIVE_WALLET_PRIVATE_KEY must be a JSON byte array [n,n,n,...] or base-58 string");
       }
+      return Keypair.fromSecretKey(bs58.decode(raw.trim()));
     })();
     this.connection = new Connection(env.LIVE_RPC_URL, "confirmed");
     this.publicKey = this.keypair.publicKey.toBase58();
