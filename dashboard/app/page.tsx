@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, CSSProperties } from "react";
-import type { AlertEvent, AlertRule, DeveloperStat, PaperLifetime, PaperState, PaperTrade, TokenState, WalletProfile } from "../lib/contracts";
+import type { AlertEvent, AlertRule, DeveloperStat, LiveState, PaperLifetime, PaperState, PaperTrade, TokenState, WalletProfile } from "../lib/contracts";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8080";
 const WS_BASE = API_BASE.startsWith("https://")
@@ -249,9 +249,10 @@ function actionStyle(a?: string): React.CSSProperties {
   }
 }
 
-function TerminalView({ tokens, search, onSelectToken, paper, onPaperControl }: {
+function TerminalView({ tokens, search, onSelectToken, paper, onPaperControl, live, onLiveControl }: {
   tokens: TokenState[]; search: string; onSelectToken: (t: TokenState) => void;
   paper: PaperState | null; onPaperControl: (action: "start" | "stop" | "reset") => void;
+  live: LiveState | null; onLiveControl: (action: "arm" | "disarm" | "reset") => void;
 }): ReactElement {
   const [sortKey, setSortKey] = useState<SortKey>("createdAt");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
@@ -451,6 +452,7 @@ function TerminalView({ tokens, search, onSelectToken, paper, onPaperControl }: 
           </div>
         </div>
         <PaperBotPanel paper={paper} onControl={onPaperControl} onSelectToken={onSelectToken} tokens={tokens} />
+        <LiveBotPanel live={live} onControl={onLiveControl} onSelectToken={onSelectToken} tokens={tokens} />
       </div>
     </div>
   );
@@ -572,6 +574,108 @@ function PaperBotPanel({ paper, onControl, onSelectToken, tokens }: {
             </div>
           ))}
           {(showHistory ? history : (paper?.trades ?? [])).length === 0 && <div className="dim" style={{ fontSize: 10 }}>no closed trades yet</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── LIVE TRADING BOT PANEL ──────────────────────────────────────────────────
+function LiveBotPanel({ live, onControl, onSelectToken, tokens }: {
+  live: LiveState | null;
+  onControl: (action: "arm" | "disarm" | "reset") => void;
+  onSelectToken: (t: TokenState) => void;
+  tokens: TokenState[];
+}): ReactElement {
+  const available = live?.available ?? false;
+  const armed = live?.armed ?? false;
+  const openByMint = (mint: string) => tokens.find(t => t.mint === mint);
+  const dailyPnl = live?.dailyPnl ?? 0;
+  const solscanUrl = (sig?: string) => sig ? `https://solscan.io/tx/${sig}` : undefined;
+
+  if (!available) {
+    return (
+      <div className="panel" style={{ flex: "0 0 auto" }}>
+        <div className="panel-hdr"><span className="title">⚡ LIVE BOT</span></div>
+        <div className="panel-body p" style={{ fontSize: 10, color: "var(--text-3)", padding: 10 }}>
+          No wallet key configured.<br />
+          Set <code>LIVE_WALLET_PRIVATE_KEY</code> in Railway env to enable live trading.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="panel" style={{ flex: "0 0 auto", maxHeight: "48%", display: "flex", flexDirection: "column", minHeight: 0 }}>
+      <div className="panel-hdr" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span className="title">⚡ LIVE BOT {armed && <span className="dot dot-green pulse" />}</span>
+        <span style={{ fontSize: 9, color: armed ? "var(--amber)" : "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+          {armed ? "ARMED · REAL SOL" : "disarmed"}
+        </span>
+      </div>
+      <div className="panel-body" style={{ padding: 10, display: "flex", flexDirection: "column", gap: 8, overflow: "hidden", minHeight: 0 }}>
+        {/* arm / disarm / reset */}
+        <div style={{ display: "flex", gap: 6 }}>
+          <button onClick={() => onControl(armed ? "disarm" : "arm")} style={{
+            flex: 1, padding: "5px 0", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em",
+            background: armed ? "var(--amber)" : "var(--green)", color: armed ? "#1a1000" : "#001b0e", border: "none", cursor: "pointer",
+          }}>{armed ? "⚠ Disarm" : "▶ Arm Live"}</button>
+          <button onClick={() => onControl("reset")} style={{
+            padding: "5px 10px", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em",
+            background: "transparent", color: "var(--text-3)", border: "1px solid var(--border)", cursor: "pointer",
+          }}>Reset</button>
+        </div>
+        {/* wallet + config */}
+        <div style={{ fontSize: 9, color: "var(--text-3)", letterSpacing: "0.04em", wordBreak: "break-all" }}>
+          wallet: <span style={{ color: "var(--text-2)" }}>{live?.walletPublicKey?.slice(0, 20)}…</span>
+          &nbsp;·&nbsp;{live?.betSize}◎/trade&nbsp;·&nbsp;max {live?.maxOpen} open
+        </div>
+        {/* daily stats */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+          <Stat label="DAILY P&L" value={`${dailyPnl >= 0 ? "+" : ""}${dailyPnl.toFixed(3)}◎`} color={dailyPnl >= 0 ? "var(--green)" : "var(--red)"} />
+          <Stat label="DAILY LIMIT" value={`−${live?.dailyLossLimit ?? 0}◎`} color="var(--text-3)" />
+          <Stat label="WIN RATE" value={live && live.tradeCount > 0 ? `${Math.round(live.winRate * 100)}%` : "—"} />
+          <Stat label="TRADES" value={`${live?.tradeCount ?? 0} (${live?.wins ?? 0}W/${live?.losses ?? 0}L)`} />
+        </div>
+        <div style={{ overflow: "auto", minHeight: 0, flex: 1 }}>
+          {/* open positions */}
+          {(live?.positions ?? []).length > 0 && (
+            <>
+              <div className="dim" style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", margin: "2px 0 4px" }}>
+                Open ({live?.openCount ?? 0})
+              </div>
+              {(live?.positions ?? []).map(p => (
+                <div key={p.mint} onClick={() => { const t = openByMint(p.mint); if (t) onSelectToken(t); }} style={{ padding: "4px 0", borderBottom: "1px solid var(--border)", cursor: "pointer" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
+                    <span className="fg">${p.symbol} {p.riding && <span style={{ fontSize: 8, color: "var(--amber)", border: "1px solid var(--amber)", padding: "0 3px" }}>RIDING</span>}</span>
+                    <span style={{ color: p.pnlPct >= 0 ? "var(--green)" : "var(--red)" }}>{p.pnlPct > 0 ? "+" : ""}{p.pnlPct.toFixed(0)}%</span>
+                  </div>
+                  <div className="dim" style={{ fontSize: 9, marginTop: 1, display: "flex", justifyContent: "space-between" }}>
+                    <span>${fmtMC(p.entryMc)} → ${fmtMC(p.currentMc)}</span>
+                    {p.txBuy && <a href={solscanUrl(p.txBuy)} target="_blank" rel="noreferrer" style={{ color: "var(--text-3)", fontSize: 8 }}>tx ↗</a>}
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+          {/* recent closed trades */}
+          <div className="dim" style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", margin: "8px 0 4px" }}>Recent trades</div>
+          {(live?.trades ?? []).slice(0, 8).map((t, i) => (
+            <div key={t.mint + i} style={{ padding: "4px 0", borderBottom: "1px solid var(--border)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
+                <span className="fg">${t.symbol} <span className="dim" style={{ fontSize: 9 }}>{t.reason}</span></span>
+                <span style={{ color: t.pnl >= 0 ? "var(--green)" : "var(--red)" }}>{t.pnl > 0 ? "+" : ""}{t.pnl.toFixed(3)}◎</span>
+              </div>
+              <div className="dim" style={{ fontSize: 9, marginTop: 1, display: "flex", justifyContent: "space-between" }}>
+                <span>${fmtMC(t.entryMc)} → ${fmtMC(t.exitMc)}</span>
+                <span style={{ display: "flex", gap: 6 }}>
+                  {t.txBuy && <a href={solscanUrl(t.txBuy)} target="_blank" rel="noreferrer" style={{ color: "var(--text-3)", fontSize: 8 }}>buy ↗</a>}
+                  {t.txSell && <a href={solscanUrl(t.txSell)} target="_blank" rel="noreferrer" style={{ color: "var(--text-3)", fontSize: 8 }}>sell ↗</a>}
+                </span>
+              </div>
+            </div>
+          ))}
+          {(live?.trades ?? []).length === 0 && <div className="dim" style={{ fontSize: 10 }}>no live trades yet</div>}
         </div>
       </div>
     </div>
@@ -1346,6 +1450,7 @@ export default function Home(): ReactElement {
   const [coverage, setCoverage] = useState<CoverageSnapshot | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [paper, setPaper] = useState<PaperState | null>(null);
+  const [live, setLive] = useState<LiveState | null>(null);
   const [selectedToken, setSelectedToken] = useState<TokenState | null>(null);
   const [selectedWallet, setSelectedWallet] = useState<WalletProfile | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -1354,7 +1459,7 @@ export default function Home(): ReactElement {
   useEffect(() => {
     const load = async (): Promise<void> => {
       try {
-        const [tR, aR, ruR, cR, wR, dR, pR] = await Promise.all([
+        const [tR, aR, ruR, cR, wR, dR, pR, lR] = await Promise.all([
           fetch(`${API_BASE}/api/tokens`),
           fetch(`${API_BASE}/api/alerts`),
           fetch(`${API_BASE}/api/alerts/rules`),
@@ -1362,6 +1467,7 @@ export default function Home(): ReactElement {
           fetch(`${API_BASE}/api/wallets`),
           fetch(`${API_BASE}/api/developers`),
           fetch(`${API_BASE}/api/paper`),
+          fetch(`${API_BASE}/api/live`),
         ]);
         const tj = await tR.json() as { tokens?: TokenState[] };
         const aj = await aR.json() as { alerts?: AlertEvent[] };
@@ -1370,6 +1476,7 @@ export default function Home(): ReactElement {
         const wj = await wR.json() as { wallets?: WalletProfile[] };
         const dj = await dR.json() as { developers?: DeveloperStat[] };
         const pj = await pR.json() as { paper?: PaperState };
+        const lj = await lR.json() as { live?: LiveState };
         if (tj.tokens) setTokens(tj.tokens);
         if (aj.alerts) setAlerts(aj.alerts);
         setRules(ruj.rules ?? []);
@@ -1377,6 +1484,7 @@ export default function Home(): ReactElement {
         if (wj.wallets) setWallets(wj.wallets);
         if (dj.developers) setDevelopers(dj.developers);
         if (pj.paper) setPaper(pj.paper);
+        if (lj.live) setLive(lj.live);
       } catch { /* backend may be starting */ }
     };
     void load();
@@ -1402,6 +1510,10 @@ export default function Home(): ReactElement {
           }
           if (msg.type === "paperUpdate") {
             if (msg.payload) setPaper(msg.payload as PaperState);
+            return;
+          }
+          if (msg.type === "liveUpdate") {
+            if (msg.payload) setLive(msg.payload as unknown as LiveState);
             return;
           }
           if (msg.type === "tokenUpdate" || msg.type === "tokenLaunch") {
@@ -1441,6 +1553,14 @@ export default function Home(): ReactElement {
     } catch { /* backend busy */ }
   }, []);
 
+  const liveControl = useCallback(async (action: "arm" | "disarm" | "reset") => {
+    try {
+      const r = await fetch(`${API_BASE}/api/live/${action}`, { method: "POST" });
+      const j = await r.json() as { live?: LiveState };
+      if (j.live) setLive(j.live);
+    } catch { /* backend busy */ }
+  }, []);
+
   return (
     <div className="app">
       <Header search={search} setSearch={setSearch} coverage={coverage} wsConnected={wsConnected} />
@@ -1448,7 +1568,7 @@ export default function Home(): ReactElement {
 
       <div style={{ minHeight: 0, overflow: "hidden", position: "relative" }}>
         {tab === "terminal" && (
-          <TerminalView tokens={tokens} search={search} onSelectToken={handleSelectToken} paper={paper} onPaperControl={paperControl} />
+          <TerminalView tokens={tokens} search={search} onSelectToken={handleSelectToken} paper={paper} onPaperControl={paperControl} live={live} onLiveControl={liveControl} />
         )}
         {tab === "token" && (
           <TokenView token={selectedToken} onSelectToken={handleSelectToken} paper={paper} />

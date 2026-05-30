@@ -39,7 +39,24 @@ const envSchema = z.object({
   FILTER_MAYHEM: z
     .enum(["true", "false"])
     .default("true")
-    .transform((v) => v === "true")
+    .transform((v) => v === "true"),
+
+  // ── Live trading (real money) ─────────────────────────────────────────────
+  // Base-58 private key of the dedicated bot wallet. Never commit. Set in
+  // Railway env only. Absent = live trading disabled entirely.
+  LIVE_WALLET_PRIVATE_KEY: z.string().optional(),
+  // Solana RPC used for tx broadcast. Defaults to Helius if set, else public.
+  LIVE_RPC_URL: z.string().default("https://api.mainnet-beta.solana.com"),
+  // SOL per trade. Keep small until edge is confirmed on real data.
+  LIVE_BET_SIZE: z.coerce.number().default(0.1),
+  // Max concurrent open positions (keeps total exposure ≤ LIVE_BET_SIZE × LIVE_MAX_OPEN).
+  LIVE_MAX_OPEN: z.coerce.number().default(8),
+  // Hard daily-loss limit in SOL. Bot disarms itself if realized losses exceed this.
+  LIVE_MAX_DAILY_LOSS: z.coerce.number().default(0.5),
+  // Priority fee in SOL per tx (added to each buy/sell to improve landing rate).
+  LIVE_PRIORITY_FEE: z.coerce.number().default(0.0005),
+  // Slippage tolerance % for PumpPortal trade-local.
+  LIVE_SLIPPAGE: z.coerce.number().default(15)
 });
 
 export const env = envSchema.parse(process.env);

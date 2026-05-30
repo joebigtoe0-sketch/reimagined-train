@@ -25,6 +25,7 @@ import { ClickHouseReadySink, LocalAnalyticsSink } from "../services/scale/analy
 import { KafkaReadyQueueAdapter, RedisStreamsQueueAdapter } from "../services/scale/queueAdapter.js";
 import { detectMarketSignals } from "../services/signals/marketSignals.js";
 import { PaperTrader } from "../services/paper/paperTrader.js";
+import { LiveTrader } from "../services/live/liveTrader.js";
 import { PlaybookStrategy } from "../services/intelligence/playbookStrategy.js";
 import { RuntimeState } from "../state/runtimeState.js";
 import type { CanonicalEvent, ProbabilityRecord, TokenState } from "../types.js";
@@ -87,6 +88,7 @@ export class RuntimeEngine {
   private lastHeavyAt = 0;
   private readonly lastAuxAt = new Map<string, number>();
   private readonly paper = new PaperTrader();
+  private readonly live = new LiveTrader();
   private readonly playbook = new PlaybookStrategy();
   private calibration: CalibrationReport = { sampleSize: 0, brierScore: 0, precision: 0, recall: 0, driftDelta: 0 };
 
@@ -154,8 +156,12 @@ export class RuntimeEngine {
 
     // Paper trading bot: act on live ACTION signals and mark positions to market.
     this.paperTimer = setInterval(() => {
-      for (const token of this.state.tokens.values()) this.paper.onToken(token);
+      for (const token of this.state.tokens.values()) {
+        this.paper.onToken(token);
+        this.live.onToken(token);
+      }
       onBroadcast("paperUpdate", this.paper.state());
+      onBroadcast("liveUpdate", this.live.state());
       // Periodically checkpoint open positions marked-to-market so a restart
       // resumes with fresh values (closes/entries already persist immediately).
       const now = Date.now();
@@ -166,6 +172,11 @@ export class RuntimeEngine {
   startPaper(): void { this.paper.start(); this.playbook.setEnabled(true); }
   stopPaper(): void { this.paper.stop(); this.playbook.setEnabled(false); }
   resetPaper(): void { void this.repo.clearPaperTrades().catch(() => {}); this.paper.reset(); }
+
+  armLive(): void { this.live.arm(); this.playbook.setEnabled(true); }
+  disarmLive(): void { this.live.disarm(); }
+  resetLive(): void { this.live.reset(); }
+  liveState() { return this.live.state(); }
   paperState() { return this.paper.state(); }
 
   private async refreshAlphaWallets(): Promise<void> {
@@ -369,7 +380,7 @@ export class RuntimeEngine {
     //   prio 0 = coins we hold (must track for TP/SL exits)
     //   prio 1 = young & still-cheap coins (the playbook's entry candidates)
     //   prio 2 = everything else still trading (kept only if budget is left over)
-    const heldMints = new Set(this.paper.openMints());
+    const heldMints = new Set([...this.paper.openMints(), ...this.live.openMints()]);
     const prio = (t: TokenState): number => {
       if (heldMints.has(t.mint)) return 0;
       const age = now - (Date.parse(t.createdAt) || now);
@@ -453,6 +464,7 @@ export class RuntimeEngine {
           // then let the paper bot act (entry on playbookBuy, exit TP3x/SL-10%).
           this.playbook.observe(token, event);
           this.paper.onTrade(token, event);
+          this.live.onTrade(token, event);
         }
         // Force-persist the graduation label immediately — it's a rare, terminal
         // positive outcome we must never drop to the aux-write throttle.

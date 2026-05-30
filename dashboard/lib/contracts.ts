@@ -91,6 +91,53 @@ export type PaperState = {
   trades: PaperTrade[];
 };
 
+export type LivePosition = {
+  mint: string;
+  symbol: string;
+  entryMc: number;
+  currentMc: number;
+  peakMc: number;
+  riding: boolean;
+  solIn: number;
+  value: number;
+  pnlPct: number;
+  entryAt: string;
+  txBuy?: string;
+};
+
+export type LiveTrade = {
+  mint: string;
+  symbol: string;
+  solIn: number;
+  solOut: number;
+  pnl: number;
+  pnlPct: number;
+  entryMc: number;
+  exitMc: number;
+  reason: string;
+  entryAt: string;
+  exitAt: string;
+  txBuy?: string;
+  txSell?: string;
+};
+
+export type LiveState = {
+  available: boolean;
+  armed: boolean;
+  walletPublicKey: string;
+  betSize: number;
+  maxOpen: number;
+  dailyPnl: number;
+  dailyLossLimit: number;
+  openCount: number;
+  tradeCount: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  positions: LivePosition[];
+  trades: LiveTrade[];
+};
+
 export type DeveloperStat = {
   devWallet: string;
   tokens: number;

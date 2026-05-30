@@ -83,6 +83,11 @@ app.post("/api/paper/start", async () => { engine.startPaper(); return { paper: 
 app.post("/api/paper/stop", async () => { engine.stopPaper(); return { paper: engine.paperState() }; });
 app.post("/api/paper/reset", async () => { engine.resetPaper(); return { paper: engine.paperState() }; });
 
+app.get("/api/live", async () => ({ live: engine.liveState() }));
+app.post("/api/live/arm", async () => { engine.armLive(); return { live: engine.liveState() }; });
+app.post("/api/live/disarm", async () => { engine.disarmLive(); return { live: engine.liveState() }; });
+app.post("/api/live/reset", async () => { engine.resetLive(); return { live: engine.liveState() }; });
+
 app.get("/api/backtest/calibration", async () => ({ report: engine.calibrationReport() }));
 app.get("/api/backtest/replay", async () => ({ replay: engine.listReplay() }));
 app.get("/api/ops/metrics", async () => {
