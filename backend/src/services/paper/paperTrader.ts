@@ -20,6 +20,8 @@ export interface PaperPosition {
   symbol: string;
   entryMc: number;
   currentMc: number;
+  peakMc: number;
+  riding: boolean;
   solIn: number;
   value: number;
   pnlPct: number;
@@ -187,6 +189,8 @@ export class PaperTrader {
         symbol: p.symbol,
         entryMc: Math.round(p.entryMc),
         currentMc: Math.round(p.currentMc),
+        peakMc: Math.round(p.peakMc),
+        riding: p.riding,
         solIn: p.solIn,
         value: round(value),
         pnlPct: p.solIn > 0 ? round(((value - p.solIn) / p.solIn) * 100) : 0,

@@ -33,6 +33,9 @@ export type TokenState = {
   peakAt?: string;
   lastTradeAt?: string;
   smartMoneyBuys?: number;
+  playbookScore?: number;
+  playbookBuy?: boolean;
+  playbookEntryMc?: number;
 };
 
 export type PaperPosition = {
@@ -40,6 +43,8 @@ export type PaperPosition = {
   symbol: string;
   entryMc: number;
   currentMc: number;
+  peakMc: number;
+  riding: boolean;
   solIn: number;
   value: number;
   pnlPct: number;

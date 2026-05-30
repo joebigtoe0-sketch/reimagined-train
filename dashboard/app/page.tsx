@@ -457,6 +457,11 @@ function TerminalView({ tokens, search, onSelectToken, paper, onPaperControl }: 
 }
 
 // ─── PAPER TRADING BOT PANEL ─────────────────────────────────────────────────
+function exitLabel(reason: string): string {
+  const map: Record<string, string> = { trail: "trail 30%", stop: "stop −10%", tp: "take-profit", dead: "dead", timestop: "time-stop", leadersell: "leader sell" };
+  return map[reason] ?? reason;
+}
+
 function PaperBotPanel({ paper, onControl, onSelectToken, tokens }: {
   paper: PaperState | null;
   onControl: (action: "start" | "stop" | "reset") => void;
@@ -502,9 +507,14 @@ function PaperBotPanel({ paper, onControl, onSelectToken, tokens }: {
             Open ({paper?.openCount ?? 0})
           </div>
           {(paper?.positions ?? []).map(p => (
-            <div key={p.mint} onClick={() => { const t = openByMint(p.mint); if (t) onSelectToken(t); }} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, padding: "3px 0", borderBottom: "1px solid var(--border)", cursor: "pointer" }}>
-              <span className="fg">${p.symbol}</span>
-              <span style={{ color: p.pnlPct >= 0 ? "var(--green)" : "var(--red)" }}>{p.pnlPct > 0 ? "+" : ""}{p.pnlPct.toFixed(0)}%</span>
+            <div key={p.mint} onClick={() => { const t = openByMint(p.mint); if (t) onSelectToken(t); }} title="open chart" style={{ padding: "4px 0", borderBottom: "1px solid var(--border)", cursor: "pointer" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
+                <span className="fg">${p.symbol} {p.riding && <span style={{ fontSize: 8, color: "var(--amber)", border: "1px solid var(--amber)", padding: "0 3px", letterSpacing: "0.06em" }}>RIDING</span>}</span>
+                <span style={{ color: p.pnlPct >= 0 ? "var(--green)" : "var(--red)" }}>{p.pnlPct > 0 ? "+" : ""}{p.pnlPct.toFixed(0)}%</span>
+              </div>
+              <div className="dim" style={{ fontSize: 9, marginTop: 1 }}>
+                ${fmtMC(p.entryMc)} → ${fmtMC(p.currentMc)} <span style={{ opacity: 0.6 }}>· peak ${fmtMC(p.peakMc)}</span>
+              </div>
             </div>
           ))}
           {(paper?.positions ?? []).length === 0 && <div className="dim" style={{ fontSize: 10 }}>no open positions</div>}
@@ -513,9 +523,12 @@ function PaperBotPanel({ paper, onControl, onSelectToken, tokens }: {
             Recent closes
           </div>
           {(paper?.trades ?? []).slice(0, 8).map((t, i) => (
-            <div key={t.mint + i} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, padding: "3px 0", borderBottom: "1px solid var(--border)" }}>
-              <span className="fg">${t.symbol} <span className="dim" style={{ fontSize: 9 }}>{t.reason}</span></span>
-              <span style={{ color: t.pnl >= 0 ? "var(--green)" : "var(--red)" }}>{t.pnl > 0 ? "+" : ""}{t.pnl.toFixed(2)}◎</span>
+            <div key={t.mint + i} onClick={() => { const tok = openByMint(t.mint); if (tok) onSelectToken(tok); }} style={{ padding: "4px 0", borderBottom: "1px solid var(--border)", cursor: openByMint(t.mint) ? "pointer" : "default" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
+                <span className="fg">${t.symbol} <span className="dim" style={{ fontSize: 9 }}>{exitLabel(t.reason)}</span></span>
+                <span style={{ color: t.pnl >= 0 ? "var(--green)" : "var(--red)" }}>{t.pnl > 0 ? "+" : ""}{t.pnl.toFixed(2)}◎ <span style={{ fontSize: 9 }}>({t.pnlPct > 0 ? "+" : ""}{t.pnlPct.toFixed(0)}%)</span></span>
+              </div>
+              <div className="dim" style={{ fontSize: 9, marginTop: 1 }}>${fmtMC(t.entryMc)} → ${fmtMC(t.exitMc)}</div>
             </div>
           ))}
           {(paper?.trades ?? []).length === 0 && <div className="dim" style={{ fontSize: 10 }}>no closed trades yet</div>}
@@ -534,8 +547,61 @@ function Stat({ label, value, color }: { label: string; value: string; color?: s
   );
 }
 
+// ─── PRICE CHART (dependency-free SVG) ───────────────────────────────────────
+function PriceChart({ mint, entryMc, exitMc }: { mint: string; entryMc?: number; exitMc?: number }): ReactElement {
+  const [pts, setPts] = useState<{ t: number; mc: number }[]>([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let cancel = false;
+    const fetchPts = (initial: boolean) => {
+      if (initial) { setLoading(true); setPts([]); }
+      fetch(`${API_BASE}/api/tokens/${mint}/trades`)
+        .then(r => r.json())
+        .then((j: { trades?: { marketCap: number; ts: string }[] }) => {
+          if (cancel) return;
+          const raw = (j.trades ?? [])
+            .map(tr => ({ t: new Date(tr.ts).getTime(), mc: Number(tr.marketCap) || 0 }))
+            .filter(p => p.mc > 0 && Number.isFinite(p.t))
+            .sort((a, b) => a.t - b.t);
+          setPts(raw); setLoading(false);
+        })
+        .catch(() => { if (!cancel) setLoading(false); });
+    };
+    fetchPts(true);
+    const iv = setInterval(() => fetchPts(false), 10000); // refresh while watching a live position
+    return () => { cancel = true; clearInterval(iv); };
+  }, [mint]);
+
+  if (loading) return <div className="dim" style={{ fontSize: 11, padding: 12 }}>loading price history…</div>;
+  if (pts.length < 2) return <div className="dim" style={{ fontSize: 11, padding: 12 }}>not enough trade history to chart yet</div>;
+
+  const W = 320, H = 120, PAD = 4;
+  const mcs = pts.map(p => p.mc);
+  let minMc = Math.min(...mcs), maxMc = Math.max(...mcs);
+  for (const v of [entryMc, exitMc]) { if (v && v > 0) { minMc = Math.min(minMc, v); maxMc = Math.max(maxMc, v); } }
+  const t0 = pts[0].t, t1 = pts[pts.length - 1].t || t0 + 1;
+  const x = (t: number) => PAD + ((t - t0) / Math.max(1, t1 - t0)) * (W - 2 * PAD);
+  const y = (mc: number) => PAD + (1 - (mc - minMc) / Math.max(1, maxMc - minMc)) * (H - 2 * PAD);
+  const path = pts.map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)},${y(p.mc).toFixed(1)}`).join(" ");
+  const up = pts[pts.length - 1].mc >= pts[0].mc;
+  return (
+    <div>
+      <svg width="100%" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: "block", background: "var(--bg-3)", border: "1px solid var(--border)" }}>
+        {entryMc && entryMc > 0 && <line x1={0} x2={W} y1={y(entryMc)} y2={y(entryMc)} stroke="var(--green)" strokeWidth={0.6} strokeDasharray="3 2" opacity={0.7} />}
+        {exitMc && exitMc > 0 && <line x1={0} x2={W} y1={y(exitMc)} y2={y(exitMc)} stroke="var(--red)" strokeWidth={0.6} strokeDasharray="3 2" opacity={0.7} />}
+        <path d={path} fill="none" stroke={up ? "var(--green)" : "var(--red)"} strokeWidth={1.2} vectorEffect="non-scaling-stroke" />
+      </svg>
+      <div className="dim" style={{ display: "flex", justifyContent: "space-between", fontSize: 9, marginTop: 3 }}>
+        <span>low ${fmtMC(minMc)}</span>
+        <span>{pts.length} trades{entryMc ? " · ⸺ entry" : ""}{exitMc ? " · ⸺ exit" : ""}</span>
+        <span>high ${fmtMC(maxMc)}</span>
+      </div>
+    </div>
+  );
+}
+
 // ─── TOKEN DEEP-DIVE VIEW ───────────────────────────────────────────────────
-function TokenView({ token, onSelectToken }: { token: TokenState | null; onSelectToken: (t: TokenState) => void }): ReactElement {
+function TokenView({ token, onSelectToken, paper }: { token: TokenState | null; onSelectToken: (t: TokenState) => void; paper: PaperState | null }): ReactElement {
   const [innerTab, setInnerTab] = useState("signals");
 
   if (!token) {
@@ -571,6 +637,11 @@ function TokenView({ token, onSelectToken }: { token: TokenState | null; onSelec
   if (buyPressure > 1.4) signals.push({ s: +8, label: "Buy pressure dominant", detail: "B/S " + buyPressure.toFixed(2) });
   if (buyPressure > 0 && buyPressure < 0.7) signals.push({ s: -8, label: "Sell pressure dominant", detail: "B/S " + buyPressure.toFixed(2) });
   const signalTotal = signals.reduce((s, x) => s + x.s, 0);
+
+  const pos = paper?.positions.find(p => p.mint === token.mint) ?? null;
+  const lastTrade = paper?.trades.find(t => t.mint === token.mint) ?? null;
+  const chartEntry = pos?.entryMc ?? lastTrade?.entryMc;
+  const chartExit = lastTrade?.exitMc;
 
   return (
     <div className="view" style={{ display: "grid", gridTemplateRows: "auto 1fr", height: "100%", background: "var(--bg)", overflow: "hidden" }}>
@@ -703,6 +774,24 @@ function TokenView({ token, onSelectToken }: { token: TokenState | null; onSelec
           <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
             {innerTab === "signals" && (
               <div style={{ padding: 12 }}>
+                <div style={{ marginBottom: 14 }}>
+                  <div className="ascii-h">PRICE (MARKET CAP) · {pos ? "IN POSITION" : lastTrade ? "CLOSED" : "history"}</div>
+                  <div style={{ marginTop: 6 }}>
+                    <PriceChart mint={token.mint} entryMc={chartEntry} exitMc={chartExit} />
+                  </div>
+                  {(pos || lastTrade) && (
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginTop: 8 }}>
+                      <Stat label="ENTRY MC" value={`$${fmtMC((pos?.entryMc ?? lastTrade?.entryMc) || 0)}`} />
+                      {pos
+                        ? <Stat label={pos.riding ? "NOW · RIDING" : "NOW"} value={`$${fmtMC(pos.currentMc)}`} color={pos.pnlPct >= 0 ? "var(--green)" : "var(--red)"} />
+                        : <Stat label={`EXIT · ${exitLabel(lastTrade!.reason)}`} value={`$${fmtMC(lastTrade!.exitMc)}`} color={lastTrade!.pnl >= 0 ? "var(--green)" : "var(--red)"} />}
+                      <Stat label="PEAK MC" value={`$${fmtMC(pos?.peakMc ?? lastTrade?.exitMc ?? 0)}`} />
+                      <Stat label="P&L" value={`${((pos?.pnlPct ?? lastTrade?.pnlPct) ?? 0) > 0 ? "+" : ""}${((pos?.pnlPct ?? lastTrade?.pnlPct) ?? 0).toFixed(0)}%`} color={((pos?.pnlPct ?? lastTrade?.pnlPct) ?? 0) >= 0 ? "var(--green)" : "var(--red)"} />
+                      {token.playbookScore != null && <Stat label="WINNER SCORE" value={`${(token.playbookScore * 100).toFixed(0)}`} color={token.playbookScore >= 0.5 ? "var(--green)" : "var(--text-2)"} />}
+                      <Stat label="SIZE" value={`${(pos?.solIn ?? lastTrade?.solIn ?? 0).toFixed(2)}◎`} />
+                    </div>
+                  )}
+                </div>
                 <div style={{ marginBottom: 12 }}>
                   <div className="ascii-h">INSIDER CONCENTRATION</div>
                   <div style={{ height: 8, background: "var(--bg-3)", marginTop: 6 }}>
@@ -1320,7 +1409,7 @@ export default function Home(): ReactElement {
           <TerminalView tokens={tokens} search={search} onSelectToken={handleSelectToken} paper={paper} onPaperControl={paperControl} />
         )}
         {tab === "token" && (
-          <TokenView token={selectedToken} onSelectToken={handleSelectToken} />
+          <TokenView token={selectedToken} onSelectToken={handleSelectToken} paper={paper} />
         )}
         {tab === "wallets" && (
           <WalletsView wallets={wallets} search={search} onSelectWallet={setSelectedWallet} selectedWallet={selectedWallet} />
