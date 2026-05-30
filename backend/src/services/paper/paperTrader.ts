@@ -86,6 +86,9 @@ export class PaperTrader {
   stop(): void { this.enabled = false; }
   isEnabled(): boolean { return this.enabled; }
 
+  /** Mints we currently hold — must keep tracking their trades for TP/SL exits. */
+  openMints(): string[] { return [...this.positions.keys()]; }
+
   reset(): void {
     this.enabled = false;
     this.cash = STARTING_BALANCE;

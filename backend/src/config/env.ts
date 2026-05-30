@@ -28,6 +28,12 @@ const envSchema = z.object({
   PUMPPORTAL_API_KEY: z.string().optional(),
   // PumpPortal reports market cap in SOL; convert to USD with this estimate.
   SOL_USD_ESTIMATE: z.coerce.number().default(150),
+  // Cost control: the PumpPortal trade stream is metered (~0.01 SOL / 10k msgs),
+  // so the number of mints we hold a trade subscription for drives spend. Lower
+  // these to cut SOL burn; raise for wider coverage. The budget is allocated by
+  // strategy relevance (held positions + young/cheap entry candidates first).
+  MAX_TRADE_SUBSCRIPTIONS: z.coerce.number().default(200),
+  TRADE_ACTIVE_WINDOW_MS: z.coerce.number().default(120000),
   // Drop Pump.fun "Mayhem Mode" launches (Token-2022 mints with an AI trading
   // agent). Detected on-chain via the mint's owner program.
   FILTER_MAYHEM: z

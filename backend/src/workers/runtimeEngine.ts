@@ -43,11 +43,16 @@ function takeValues<K, V>(map: Map<K, V>, n: number): V[] {
   return out;
 }
 
-// Max tokens we keep an active (metered) trade subscription for at once.
-const MAX_TRADE_SUBSCRIPTIONS = 400;
-// A token with no observed trade within this window is considered dead and we
-// stop paying to track it. New tokens count from launch (lastTradeAt=createdAt).
-const ACTIVE_WINDOW_MS = 3 * 60 * 1000;
+// Max tokens we keep an active (metered) trade subscription for at once, and the
+// quiet-window after which we stop paying to track a token. Both env-tunable so
+// SOL spend can be dialed without a code change (see config/env.ts).
+const MAX_TRADE_SUBSCRIPTIONS = env.MAX_TRADE_SUBSCRIPTIONS;
+const ACTIVE_WINDOW_MS = env.TRADE_ACTIVE_WINDOW_MS;
+// The playbook only acts on coins while they're still cheap and fresh, so the
+// trade-subscription budget is spent on those (+ open positions) first, rather
+// than on already-pumped coins whose firehose of trades we have no action on.
+const ENTRY_ZONE_MAX_MC = 15_000;
+const ENTRY_ZONE_MAX_AGE_MS = 10 * 60 * 1000;
 // No trade for this long ⇒ the token is dead (UI + probabilities reflect it).
 const DEAD_AFTER_MS = 2 * 60 * 1000;
 // How often we recompute the proven-predictive ("alpha") wallet set from outcomes.
@@ -333,11 +338,27 @@ export class RuntimeEngine {
     // budget for live ones. New tokens get the full window from launch (their
     // lastTradeAt starts at createdAt) to show their first trades.
     const now = Date.now();
-    const trackedMints = [...this.state.tokens.values()]
-      .filter((t) => now - (Date.parse(t.lastTradeAt) || Date.parse(t.createdAt) || now) < ACTIVE_WINDOW_MS)
-      .sort((a, b) => (Date.parse(b.lastTradeAt) || 0) - (Date.parse(a.lastTradeAt) || 0))
-      .map((t) => t.mint)
-      .slice(0, MAX_TRADE_SUBSCRIPTIONS);
+    const lastTradeMs = (t: TokenState) => Date.parse(t.lastTradeAt) || Date.parse(t.createdAt) || now;
+    // Spend the metered budget by strategy relevance, not raw busy-ness:
+    //   prio 0 = coins we hold (must track for TP/SL exits)
+    //   prio 1 = young & still-cheap coins (the playbook's entry candidates)
+    //   prio 2 = everything else still trading (kept only if budget is left over)
+    const heldMints = new Set(this.paper.openMints());
+    const prio = (t: TokenState): number => {
+      if (heldMints.has(t.mint)) return 0;
+      const age = now - (Date.parse(t.createdAt) || now);
+      if (age <= ENTRY_ZONE_MAX_AGE_MS && t.marketCap > 0 && t.marketCap <= ENTRY_ZONE_MAX_MC) return 1;
+      return 2;
+    };
+    const tracked = new Set(heldMints); // never drop an open position
+    const alive = [...this.state.tokens.values()]
+      .filter((t) => now - lastTradeMs(t) < ACTIVE_WINDOW_MS)
+      .sort((a, b) => prio(a) - prio(b) || lastTradeMs(b) - lastTradeMs(a));
+    for (const t of alive) {
+      if (tracked.size >= MAX_TRADE_SUBSCRIPTIONS) break;
+      tracked.add(t.mint);
+    }
+    const trackedMints = [...tracked];
     if (trackedMints.length > 0) {
       const bqTrades = await this.source.pollTrades(trackedMints);
       const tradeEvents: CanonicalEvent[] = bqTrades.map((t) => ({
