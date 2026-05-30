@@ -177,6 +177,56 @@ export class RuntimeRepo {
     }));
   }
 
+  /**
+   * "Leader" wallets = wallets with proven REALIZED SOL profit, used for live
+   * copy-trading. Mirrors scripts/copytrade.mjs leader selection: per (wallet,
+   * mint) net = SOL out − SOL in; a wallet qualifies if cumulative net, number
+   * of closed round-trips, and win rate clear the thresholds. These are the
+   * wallets a 2-of consensus buy should make us copy.
+   */
+  async listLeaderWallets(opts?: {
+    minNetSol?: number;
+    minTrips?: number;
+    minWinRate?: number;
+    limit?: number;
+  }): Promise<Array<{ wallet: string; netSol: number; trips: number; winRate: number }>> {
+    if (!this.pool) return [];
+    const minNetSol = opts?.minNetSol ?? 5;
+    const minTrips = opts?.minTrips ?? 5;
+    const minWinRate = opts?.minWinRate ?? 0.6;
+    const limit = opts?.limit ?? 500;
+    const result = await this.pool.query(
+      `WITH pos AS (
+         SELECT wallet, mint,
+                SUM(CASE WHEN side='sell' THEN amount_sol ELSE 0 END)::float8 AS sol_out,
+                SUM(CASE WHEN side='buy'  THEN amount_sol ELSE 0 END)::float8 AS sol_in
+         FROM trades
+         WHERE wallet <> 'UNKNOWN_WALLET'
+         GROUP BY wallet, mint
+       ),
+       wstat AS (
+         SELECT wallet,
+                SUM(sol_out - sol_in)::float8 AS net,
+                COUNT(*) FILTER (WHERE sol_out > 0)::int AS trips,
+                COUNT(*) FILTER (WHERE sol_out > 0 AND sol_out - sol_in > 0)::int AS wins
+         FROM pos
+         GROUP BY wallet
+       )
+       SELECT wallet, net, trips, (wins::float8 / NULLIF(trips,0)) AS win_rate
+       FROM wstat
+       WHERE net >= $1 AND trips >= $2 AND (wins::float8 / NULLIF(trips,0)) >= $3
+       ORDER BY net DESC
+       LIMIT $4`,
+      [minNetSol, minTrips, minWinRate, limit]
+    );
+    return (result.rows as Array<{ wallet: string; net: number; trips: number; win_rate: number }>).map((r) => ({
+      wallet: r.wallet,
+      netSol: Number(r.net),
+      trips: Number(r.trips),
+      winRate: Number(r.win_rate)
+    }));
+  }
+
   async upsertWallet(profile: WalletProfile): Promise<void> {
     if (!this.pool) return;
     await this.pool.query(

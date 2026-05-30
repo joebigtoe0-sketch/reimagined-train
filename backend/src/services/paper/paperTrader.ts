@@ -4,13 +4,12 @@ import type { CanonicalEvent, TokenState } from "../../types.js";
  * Paper trading bot. Trades the live signals with fake money so we can watch how
  * they would actually perform — no real funds at risk.
  *
- * ENTRY: open a fixed-size position when ACTION = BUY (once per mint).
- * EXIT : the validated "smart_combo / tp3" rule from scripts/exitsim.mjs — the
- *        best exit our backtests found. Sell on whichever fires first:
- *          • take-profit  — market cap reaches TP_MULT × entry
- *          • whale dump   — a single sell >= BIG_SELL_SOL
- *          • sell-flip    — sells outnumber buys in the last FLIP_WINDOW
- *          • momentum stall — no buy for STALL_MS
+ * Strategy = the validated COPY-TRADE edge (scripts/copytrade.mjs):
+ *   ENTRY: ACTION = BUY, i.e. ≥2 proven-profitable "leader" wallets bought the
+ *          coin while still fresh. Fixed size, once per mint.
+ *   EXIT : whichever comes first —
+ *          • leader sell  — a tracked leader wallet sells the coin (copy exit)
+ *          • time-stop    — held longer than HOLD_STOP_MS without a leader exit
  *          • dead         — token flagged dead/failed
  *
  * Position value is marked to market from the token's current market cap.
@@ -61,12 +60,8 @@ export interface PaperState {
 const STARTING_BALANCE = 10; // SOL
 const BET_SIZE = 0.5; // SOL per position
 const MAX_OPEN = 12;
-const EXIT_FEE = 0.98; // round-trip slippage/fee haircut on exit
-// smart_combo / tp3 exit parameters (from exitsim.mjs).
-const TP_MULT = 3.0;
-const BIG_SELL_SOL = 1.5;
-const FLIP_WINDOW_MS = 30_000;
-const STALL_MS = 45_000;
+const EXIT_FEE = 0.96; // 4% round-trip fee+slippage (matches the copytrade backtest)
+const HOLD_STOP_MS = 120_000; // exit if no leader has sold within 2 minutes
 
 interface Pos {
   mint: string;
@@ -75,8 +70,7 @@ interface Pos {
   currentMc: number;
   solIn: number;
   entryAt: string;
-  lastBuyTs: number;
-  window: Array<{ ts: number; side: string }>;
+  entryTsMs: number;
 }
 
 export class PaperTrader {
@@ -104,17 +98,15 @@ export class PaperTrader {
     this.trades.length = 0;
   }
 
-  /** Tick (every few seconds): entries on BUY + time-based exits (stall/dead/TP). */
+  /** Tick (every few seconds): entries on BUY + time-stop / dead exits. */
   onToken(token: TokenState): void {
     const pos = this.positions.get(token.mint);
     if (pos) {
       if (token.marketCap > 0) pos.currentMc = token.marketCap;
       if (token.lifecycle === "dead" || token.lifecycle === "failed" || token.action === "DEAD") {
         this.close(token.mint, "dead");
-      } else if (pos.currentMc >= pos.entryMc * TP_MULT) {
-        this.close(token.mint, "tp");
-      } else if (Date.now() - pos.lastBuyTs > STALL_MS) {
-        this.close(token.mint, "stall");
+      } else if (Date.now() - pos.entryTsMs >= HOLD_STOP_MS) {
+        this.close(token.mint, "timestop");
       }
       return;
     }
@@ -128,30 +120,19 @@ export class PaperTrader {
           currentMc: token.marketCap,
           solIn: BET_SIZE,
           entryAt: new Date().toISOString(),
-          lastBuyTs: Date.now(),
-          window: [],
+          entryTsMs: Date.now(),
         });
         this.traded.add(token.mint);
       }
     }
   }
 
-  /** Per-trade: order-flow exits (take-profit / whale dump / sell-flip). */
-  onTrade(token: TokenState, event: CanonicalEvent): void {
+  /** Per-trade copy exit: bail when a tracked leader wallet sells the coin. */
+  onTrade(token: TokenState, event: CanonicalEvent, leaderSell: boolean): void {
     const pos = this.positions.get(event.mint);
     if (!pos) return;
-    const ts = Date.parse(event.timestamp) || Date.now();
     if (token.marketCap > 0) pos.currentMc = token.marketCap;
-
-    if (pos.currentMc >= pos.entryMc * TP_MULT) { this.close(pos.mint, "tp"); return; }
-    if (event.side === "sell" && event.amountSol >= BIG_SELL_SOL) { this.close(pos.mint, "whale"); return; }
-
-    pos.window.push({ ts, side: event.side ?? "buy" });
-    if (event.side === "buy") pos.lastBuyTs = ts;
-    while (pos.window.length && ts - pos.window[0].ts > FLIP_WINDOW_MS) pos.window.shift();
-    let buys = 0, sells = 0;
-    for (const w of pos.window) { if (w.side === "sell") sells++; else buys++; }
-    if (buys + sells >= 4 && sells > buys) this.close(pos.mint, "sellflip");
+    if (leaderSell) this.close(pos.mint, "leadersell");
   }
 
   private close(mint: string, reason: string): void {

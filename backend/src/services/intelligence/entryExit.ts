@@ -168,13 +168,14 @@ export function computeAction(args: {
     return "EXIT"; // exit / dead
   }
 
-  // Pre-entry: only call BUY while it's still realistically enterable (fresh)
-  // and conviction is real (tuned gate, strong score, or smart money present).
-  const fresh = args.ageMinutes <= 10;
-  const smart = args.smartMoneyBuys >= 1;
-  const conviction = smart || (args.qualified && args.entryScore >= 45) || args.entrySignal === "strong";
-  if (fresh && conviction) return "BUY";
-  if (fresh && (args.entrySignal === "moderate" || args.entryScore >= 30)) return "WATCH";
+  // Pre-entry. The validated edge (scripts/copytrade.mjs) is COPY-TRADE: only
+  // BUY when ≥2 proven-profitable "leader" wallets buy the coin while it's still
+  // fresh. Mechanical breadth-scalping is net-negative (scripts/scalpsim.mjs),
+  // so breadth alone is only ever a WATCH — never a BUY.
+  const fresh = args.ageMinutes <= 3; // copy entry window ≈ first 2 min + latency
+  if (fresh && args.smartMoneyBuys >= 2) return "BUY"; // 2-of leader consensus
+  if (fresh && args.smartMoneyBuys === 1) return "WATCH"; // one leader = not enough
+  if (fresh && (args.entrySignal === "strong" || args.entryScore >= 50)) return "WATCH";
   if (args.entrySignal === "avoid") return "AVOID";
   return fresh ? "WATCH" : "AVOID";
 }

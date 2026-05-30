@@ -137,13 +137,16 @@ export class RuntimeEngine {
 
   private async refreshAlphaWallets(): Promise<void> {
     try {
-      const alpha = await this.repo.listPredictiveWallets();
-      if (alpha.length === 0) return;
+      // Leaders = wallets with proven realized SOL profit (copy-trade edge,
+      // validated out-of-sample in scripts/copytrade.mjs). A 2-of consensus of
+      // these buying a fresh coin is our live BUY signal.
+      const leaders = await this.repo.listLeaderWallets();
+      if (leaders.length === 0) return;
       this.state.alphaWallets.clear();
-      for (const a of alpha) this.state.alphaWallets.add(a.wallet);
-      console.log(`[alpha] tracking ${this.state.alphaWallets.size} proven-predictive wallets`);
+      for (const l of leaders) this.state.alphaWallets.add(l.wallet);
+      console.log(`[leaders] tracking ${this.state.alphaWallets.size} proven-profitable wallets for copy-trade`);
     } catch (err) {
-      console.warn("[alpha] refresh error:", err instanceof Error ? err.message : err);
+      console.warn("[leaders] refresh error:", err instanceof Error ? err.message : err);
     }
   }
 
@@ -371,7 +374,10 @@ export class RuntimeEngine {
         void this.repo.insertEvent(event);
         if (event.type === "trade") void this.repo.insertTrade(event);
         if (!token) continue; // trade on unknown mint — skip
-        if (event.type === "trade") this.paper.onTrade(token, event);
+        if (event.type === "trade") {
+          const leaderSell = event.side === "sell" && this.state.alphaWallets.has(event.wallet);
+          this.paper.onTrade(token, event, leaderSell);
+        }
         const alerts = evaluateAlerts(token);
         for (const alert of alerts) {
           this.state.alerts.unshift(alert);
