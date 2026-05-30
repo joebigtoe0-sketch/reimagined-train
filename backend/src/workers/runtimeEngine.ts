@@ -354,6 +354,30 @@ export class RuntimeEngine {
       if (tradeEvents.length > 0) await this.queueAdapter.publish(tradeEvents);
     }
 
+    // ── Step 3: bonding-curve graduations (authoritative `migrated` label) ───
+    // Global feed — labels migrations even for mints whose trade subscription we
+    // already dropped. Only tokens we actually tracked get a state update.
+    if (this.source.pollMigrations) {
+      const migrations = await this.source.pollMigrations();
+      if (migrations.length > 0) {
+        const migEvents: CanonicalEvent[] = migrations.map((m) => ({
+          id: `pp-migrate:${m.mint}`,
+          source: "helius" as const,
+          type: "migration" as const,
+          mint: m.mint,
+          wallet: "MIGRATION",
+          timestamp: m.timestamp,
+          signature: m.signature,
+          amountSol: 0,
+          marketCap: m.marketCap ?? 0,
+          participants: [],
+          mints: [m.mint],
+          metadata: { pool: m.pool ?? "unknown" }
+        }));
+        await this.queueAdapter.publish(migEvents);
+      }
+    }
+
     await this.repo.checkpoint("ingestion-worker", new Date().toISOString());
     updateMetrics({ ingestionLagMs: Date.now() - start });
     onBroadcast("ingestionBatch", { size: bqTokens.length });
@@ -373,10 +397,16 @@ export class RuntimeEngine {
         // processing or cause us to drop events (esp. launches) from the feed.
         void this.repo.insertEvent(event);
         if (event.type === "trade") void this.repo.insertTrade(event);
-        if (!token) continue; // trade on unknown mint — skip
+        if (!token) continue; // trade/migration on unknown mint — skip
         if (event.type === "trade") {
           const leaderSell = event.side === "sell" && this.state.alphaWallets.has(event.wallet);
           this.paper.onTrade(token, event, leaderSell);
+        }
+        // Force-persist the graduation label immediately — it's a rare, terminal
+        // positive outcome we must never drop to the aux-write throttle.
+        if (event.type === "migration") {
+          void this.repo.upsertTokenOutcome(token.mint, token.athMarketCap, true);
+          console.log(`[migration] ${token.symbol || token.mint.slice(0, 6)} graduated → labeled migrated`);
         }
         const alerts = evaluateAlerts(token);
         for (const alert of alerts) {

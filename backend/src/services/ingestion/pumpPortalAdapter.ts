@@ -17,7 +17,7 @@
 
 import { WebSocket } from "ws";
 import { env } from "../../config/env.js";
-import type { IngestionSource, LaunchInfo, TradeInfo } from "./ingestionSource.js";
+import type { IngestionSource, LaunchInfo, TradeInfo, MigrationInfo } from "./ingestionSource.js";
 
 const BASE_URL = "wss://pumpportal.fun/api/data";
 const PUMP_TOKEN_SUPPLY = 1_000_000_000;
@@ -45,9 +45,11 @@ export class PumpPortalAdapter implements IngestionSource {
   private connecting = false;
   private launchBuffer: LaunchInfo[] = [];
   private tradeBuffer: TradeInfo[] = [];
+  private migrationBuffer: MigrationInfo[] = [];
   private subscribedMints = new Set<string>();
   private seenMints = new Set<string>();
   private seenTradeSigs = new Set<string>();
+  private seenMigrations = new Set<string>();
   private warnedNoKey = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
@@ -81,6 +83,10 @@ export class PumpPortalAdapter implements IngestionSource {
       this.connecting = false;
       console.log("[PumpPortal] ✓ WebSocket connected");
       this.send({ method: "subscribeNewToken" });
+      // Global graduation feed — fires for EVERY migration regardless of whether
+      // we hold a per-token trade subscription. This is our authoritative
+      // `migrated` label (free, no key required).
+      this.send({ method: "subscribeMigration" });
       // Re-subscribe to any mints we were tracking before a reconnect.
       if (this.subscribedMints.size > 0 && env.PUMPPORTAL_API_KEY) {
         this.send({ method: "subscribeTokenTrade", keys: [...this.subscribedMints] });
@@ -160,6 +166,28 @@ export class PumpPortalAdapter implements IngestionSource {
 
     const solUsd = env.SOL_USD_ESTIMATE;
 
+    // Bonding-curve graduation. PumpPortal labels these txType "migrate"; we also
+    // accept a bare pool-only message defensively in case the schema shifts.
+    const isMigration =
+      msg.txType === "migrate" ||
+      msg.txType === "migration" ||
+      (!!msg.pool && msg.txType !== "buy" && msg.txType !== "sell" && msg.txType !== "create");
+    if (isMigration && msg.mint) {
+      const key = msg.signature || msg.mint;
+      if (this.seenMigrations.has(key)) return;
+      this.seenMigrations.add(key);
+      const mcUsd = (msg.marketCapSol ?? 0) * solUsd;
+      this.migrationBuffer.push({
+        mint: msg.mint,
+        signature: msg.signature || `migrate:${msg.mint}`,
+        pool: msg.pool,
+        marketCap: mcUsd > 0 ? Math.round(mcUsd) : undefined,
+        timestamp: new Date().toISOString()
+      });
+      this.capSet(this.seenMigrations, 20_000, 10_000);
+      return;
+    }
+
     if (msg.txType === "create" && msg.mint) {
       if (this.seenMints.has(msg.mint)) return;
       this.seenMints.add(msg.mint);
@@ -202,6 +230,16 @@ export class PumpPortalAdapter implements IngestionSource {
     this.launchBuffer = [];
     if (out.length > 0) {
       console.log(`[PumpPortal] +${out.length} new token(s): ${out.map((r) => `$${r.symbol}`).join(", ")}`);
+    }
+    return out;
+  }
+
+  async pollMigrations(): Promise<MigrationInfo[]> {
+    this.connect();
+    const out = this.migrationBuffer;
+    this.migrationBuffer = [];
+    if (out.length > 0) {
+      console.log(`[PumpPortal] ⬆ ${out.length} migration(s): ${out.map((m) => m.mint.slice(0, 6)).join(", ")}`);
     }
     return out;
   }

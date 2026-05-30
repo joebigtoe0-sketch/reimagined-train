@@ -28,6 +28,15 @@ export interface TradeInfo {
   timestamp: string;
 }
 
+/** A bonding-curve graduation (token migrated to a DEX/AMM). */
+export interface MigrationInfo {
+  mint: string;
+  signature: string;
+  pool?: string;
+  marketCap?: number;
+  timestamp: string;
+}
+
 export interface IngestionSource {
   /** Stable identifier, e.g. "pumpportal" | "bitquery". */
   readonly name: string;
@@ -39,4 +48,10 @@ export interface IngestionSource {
   pollNewLaunches(): Promise<LaunchInfo[]>;
   /** Drain/poll recent trades for the given tracked mints. */
   pollTrades(mints: string[]): Promise<TradeInfo[]>;
+  /**
+   * Drain/poll bonding-curve graduations (token migrations). Optional: a
+   * provider that can't emit migrations simply omits it. The stream is global
+   * (all tokens), so it labels migrations even for mints we stopped tracking.
+   */
+  pollMigrations?(): Promise<MigrationInfo[]>;
 }
