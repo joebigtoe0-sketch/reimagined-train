@@ -4,12 +4,13 @@ import type { CanonicalEvent, TokenState } from "../../types.js";
  * Paper trading bot. Trades the live signals with fake money so we can watch how
  * they would actually perform — no real funds at risk.
  *
- * Strategy = the validated PLAYBOOK edge (scripts/playbook.mjs, the only config
+ * Strategy = the validated PLAYBOOK edge (scripts/strathunt.mjs, the only config
  * that survived out-of-sample + slippage stress):
  *   ENTRY: token.playbookBuy — set by PlaybookStrategy when a cheap (≤$12k) coin
  *          crosses the top-20% winner-score and is NOT serial-sprayed.
  *   EXIT : ride to 2×, then trail 30% off the peak; hard stop at −10%; or dead.
- *          (+16.7%/trade out-of-sample on 81k validation tokens.)
+ *          (+6.9%/trade out-of-sample on the 20-day, 620k-token validation set:
+ *          ~15% win rate, fat-tailed — a few 2×+ runners carry the average.)
  *
  * Position value is marked to market from the token's current market cap.
  * Round-trip cost is a conservative 6% (matches the validated backtest).
