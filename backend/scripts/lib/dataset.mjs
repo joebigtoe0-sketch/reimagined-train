@@ -30,11 +30,12 @@ const DEFAULT_DB =
   "postgresql://postgres:dKuAVIRoFpGsIfrbUzOSqNuyEaiXbxwr@zephyr.proxy.rlwy.net:54148/railway";
 
 function parseFlags(argv) {
-  const flags = { db: true, exports: true, dirs: [] };
+  const flags = { db: true, exports: true, dirs: [], dedup: true };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--no-db") flags.db = false;
     else if (argv[i] === "--no-exports") flags.exports = false;
     else if (argv[i] === "--dir") flags.dirs.push(argv[++i]);
+    else if (argv[i] === "--no-dedup") flags.dedup = false; // skip the trade-dedup Set (saves GBs on huge single-source exports)
   }
   return flags;
 }
@@ -75,9 +76,13 @@ export async function loadDataset(argv = process.argv.slice(2)) {
 
   const addTrade = (t) => {
     if (!t.wallet || t.wallet === "UNKNOWN_WALLET" || !t.mint) return;
-    const k = tradeKey(t);
-    if (tradeSeen.has(k)) return;
-    tradeSeen.add(k);
+    if (flags.dedup) {
+      const k = tradeKey(t);
+      if (tradeSeen.has(k)) return;
+      tradeSeen.add(k);
+    } else {
+      t.signature = undefined; // not needed downstream; drop to save memory
+    }
     let a = tradesByMint.get(t.mint);
     if (!a) { a = []; tradesByMint.set(t.mint, a); }
     a.push(t);

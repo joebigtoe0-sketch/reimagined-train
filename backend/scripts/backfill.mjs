@@ -81,16 +81,27 @@ async function getRange(key, exchange) {
 
 async function download(key, exchange, date, hour, dest) {
   const url = `${API}/download?exchange=${exchange}&date=${date}&hour=${hour}`;
-  const res = await fetch(url, { headers: { "X-API-Key": key } });
-  if (res.status === 404) return "missing"; // hour has no file — skip, no credit
-  if (res.status === 401 || res.status === 402 || res.status === 403) {
-    throw new Error(`STOP — auth/credit error ${res.status}: ${await res.text()}`);
+  // Retry transient network errors (undici "terminated", resets, timeouts) so a
+  // single blip can't abort a long run. Auth/credit errors are fatal (no retry).
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const res = await fetch(url, { headers: { "X-API-Key": key } });
+      if (res.status === 404) return "missing"; // hour has no file — skip, no credit
+      if (res.status === 401 || res.status === 402 || res.status === 403) {
+        throw new Error(`STOP — auth/credit error ${res.status}: ${await res.text()}`);
+      }
+      if (!res.ok) { console.warn(`  ! ${date} ${hour}: ${res.status}, skipping`); return "error"; }
+      const buf = Buffer.from(await res.arrayBuffer());
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, buf);
+      return "ok";
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.startsWith("STOP")) throw err;
+      if (attempt >= 4) { console.warn(`\n  ! ${date} ${hour}: ${msg} (gave up after ${attempt} tries)`); return "error"; }
+      await sleep(2000 * attempt);
+    }
   }
-  if (!res.ok) { console.warn(`  ! ${date} ${hour}: ${res.status}, skipping`); return "error"; }
-  const buf = Buffer.from(await res.arrayBuffer());
-  fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.writeFileSync(dest, buf);
-  return "ok";
 }
 
 const num = (v) => (typeof v === "bigint" ? Number(v) : Number(v ?? 0));

@@ -1,36 +1,35 @@
 import type { CanonicalEvent, TokenState } from "../../types.js";
 
 /**
- * Playbook strategy — the only configuration that survived out-of-sample +
- * slippage stress (scripts/playbook.mjs, target = peak MC ≥ $15k):
+ * Playbook strategy — re-derived on the REAL backfilled dataset (220k tokens /
+ * 14.8M trades) and validated out-of-sample on 81k tokens (scripts/strathunt.mjs,
+ * model target = peak MC ≥ $25k):
  *
  *   ENTRY  : while a coin is still cheap (MC ≤ $12k) and within 10 min of launch,
- *            BUY the first moment the winner-score crosses the top-5% threshold,
- *            UNLESS the coin looks bundled or serial-sprayed (avoid filters).
- *   EXIT   : take profit at 3×, hard stop at −10%  (handled by the paper bot).
+ *            BUY the first moment the winner-score crosses the top-20% threshold,
+ *            UNLESS the coin is serial-sprayed (median early buyer has sprayed
+ *            ≥3 launches). The bundle filter was dropped — it was noise.
+ *   EXIT   : bank at 2×, then trail 30% off the peak; hard stop at −10%
+ *            (handled by the paper bot). +16.7%/trade OOS, +15.3% excl. top-3.
  *
  * The winner-score is a logistic model over 7 leakage-free, live-computable
  * early-window features. Constants were fit on TRAIN data and printed by
- * scripts/playbook.mjs — DO NOT hand-edit; re-run that script to refresh them.
+ * scripts/strathunt.mjs — DO NOT hand-edit; re-run that script to refresh them.
  */
 
-// ── embedded model (from scripts/playbook.mjs, 7 features) ────────────────────
-const MEAN = [1.923439, 2.142338, 3.139656, -0.528255, 0.561229, 1.164856, 0.253601];
-const STD = [1.240283, 1.286111, 1.191042, 1.412137, 0.329365, 1.374178, 0.222948];
-const W = [1.200789, 1.354491, -1.117589, 0.559646, -0.294459, 0.326764, 0.275421];
-const B = -2.403345;
-const TH = 0.856351; // top-5% entry threshold
+// ── embedded model (from scripts/strathunt.mjs, target 25k, 7 features) ───────
+const MEAN = [2.169528, 2.162350, 3.182991, 0.515254, 0.511217, 1.582736, 0.370023];
+const STD = [1.008290, 1.319759, 1.123969, 0.862261, 0.271999, 1.375810, 0.321195];
+const W = [-1.405720, 0.614847, 1.748346, 1.328486, 0.889240, 0.192148, -0.334048];
+const B = -1.394214;
+const TH = 0.497508; // top-20% entry threshold
 
 // ── strategy params (validated) ───────────────────────────────────────────────
 const ENTRY_MC_CAP = 12_000;     // only buy while still cheap
 const ENTRY_CAP_MS = 600_000;    // don't open after 10 min
-const BUNDLE_MS = 15_000;        // window for bundle fingerprint
 const FEAT_MS = 60_000;          // window that defines an "early buyer" (serial count)
 const MIN_EARLY_TRADES = 3;
-const BUNDLE_TWIN_MS = 2_000;    // near-simultaneous
-const BUNDLE_SIZE_TOL = 0.15;    // similar size
-const AVOID_BUNDLE_FRAC = 0.5;   // skip if ≥50% of early buys are bundled
-const AVOID_SERIAL_MED = 5;      // skip if median early-buyer has sprayed ≥5 launches
+const AVOID_SERIAL_MED = 3;      // skip if median early-buyer has sprayed ≥3 launches
 
 interface EarlyStats {
   createdMs: number;
@@ -42,7 +41,6 @@ interface EarlyStats {
   vol: number;
   buyVol: number;
   maxBuyer: number;
-  bundleBuys: Array<{ ts: number; sol: number }>; // first-15s buys
   earlySeen: Set<string>; // distinct first-60s buyers (for serial counting)
   decided: boolean; // entry decision already made (bought or skipped)
 }
@@ -62,7 +60,7 @@ export class PlaybookStrategy {
     const createdMs = Date.parse(token.createdAt) || Date.now();
     let st = this.stats.get(token.mint);
     if (!st) {
-      st = { createdMs, buyers: new Map(), n: 0, buys: 0, sells: 0, net: 0, vol: 0, buyVol: 0, maxBuyer: 0, bundleBuys: [], earlySeen: new Set(), decided: false };
+      st = { createdMs, buyers: new Map(), n: 0, buys: 0, sells: 0, net: 0, vol: 0, buyVol: 0, maxBuyer: 0, earlySeen: new Set(), decided: false };
       this.stats.set(token.mint, st);
     }
     const ts = Date.parse(event.timestamp) || Date.now();
@@ -74,7 +72,6 @@ export class PlaybookStrategy {
       const v = (st.buyers.get(event.wallet) || 0) + sol;
       st.buyers.set(event.wallet, v);
       if (v > st.maxBuyer) st.maxBuyer = v;
-      if (ts <= createdMs + BUNDLE_MS) st.bundleBuys.push({ ts, sol });
       if (ts <= createdMs + FEAT_MS && !st.earlySeen.has(event.wallet)) {
         st.earlySeen.add(event.wallet);
         this.serialCount.set(event.wallet, (this.serialCount.get(event.wallet) || 0) + 1);
@@ -89,9 +86,8 @@ export class PlaybookStrategy {
     if (ts - createdMs > ENTRY_CAP_MS) { st.decided = true; return; }
     if (st.n < MIN_EARLY_TRADES) return;
     if ((token.playbookScore ?? 0) < TH) return;
-    // score crossed the bar — decide once: buy unless bundled / serial-sprayed
+    // score crossed the bar — decide once: buy unless serial-sprayed
     st.decided = true;
-    if (this.bundleFrac(st) >= AVOID_BUNDLE_FRAC) return;
     if (this.serialMed(st) >= AVOID_SERIAL_MED) return;
     token.playbookBuy = true;
     token.playbookEntryMc = event.marketCap;
@@ -118,22 +114,6 @@ export class PlaybookStrategy {
     let s = B;
     for (let j = 0; j < x.length; j++) s += W[j] * ((x[j] - MEAN[j]) / STD[j]);
     return sigmoid(s);
-  }
-
-  private bundleFrac(st: EarlyStats): number {
-    const eb = st.bundleBuys;
-    if (eb.length === 0) return 0;
-    let twin = 0;
-    for (let i = 0; i < eb.length; i++) {
-      for (let j = 0; j < eb.length; j++) {
-        if (i === j) continue;
-        if (Math.abs(eb[i].ts - eb[j].ts) <= BUNDLE_TWIN_MS) {
-          const a = eb[i].sol, b = eb[j].sol, mx = Math.max(a, b) || 1;
-          if (Math.abs(a - b) / mx <= BUNDLE_SIZE_TOL) { twin++; break; }
-        }
-      }
-    }
-    return twin / eb.length;
   }
 
   private serialMed(st: EarlyStats): number {

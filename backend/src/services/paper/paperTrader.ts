@@ -7,8 +7,9 @@ import type { CanonicalEvent, TokenState } from "../../types.js";
  * Strategy = the validated PLAYBOOK edge (scripts/playbook.mjs, the only config
  * that survived out-of-sample + slippage stress):
  *   ENTRY: token.playbookBuy — set by PlaybookStrategy when a cheap (≤$12k) coin
- *          crosses the top-5% winner-score and is NOT bundled / serial-sprayed.
- *   EXIT : take profit at 3×, hard stop at −10%, or token flagged dead.
+ *          crosses the top-20% winner-score and is NOT serial-sprayed.
+ *   EXIT : ride to 2×, then trail 30% off the peak; hard stop at −10%; or dead.
+ *          (+16.7%/trade out-of-sample on 81k validation tokens.)
  *
  * Position value is marked to market from the token's current market cap.
  * Round-trip cost is a conservative 6% (matches the validated backtest).
@@ -60,7 +61,8 @@ const STARTING_BALANCE = 10; // SOL
 const BET_SIZE = 0.5; // SOL per position
 const MAX_OPEN = 12;
 const EXIT_FEE = 0.94; // 6% round-trip fee+slippage (conservative; matches playbook backtest)
-const TP_MULT = 3.0; // take profit at 3x
+const RIDE_TRIGGER = 2.0; // start trailing once we're up 2x
+const TRAIL_FRAC = 0.30; // after the trigger, exit on a 30% give-back from the peak
 const SL_MULT = 0.9; // hard stop at -10%
 
 interface Pos {
@@ -68,6 +70,8 @@ interface Pos {
   symbol: string;
   entryMc: number;
   currentMc: number;
+  peakMc: number;
+  riding: boolean;
   solIn: number;
   entryAt: string;
 }
@@ -117,6 +121,8 @@ export class PaperTrader {
           symbol: token.symbol || token.mint.slice(0, 6),
           entryMc,
           currentMc: token.marketCap > 0 ? token.marketCap : entryMc,
+          peakMc: token.marketCap > 0 ? token.marketCap : entryMc,
+          riding: false,
           solIn: BET_SIZE,
           entryAt: new Date().toISOString(),
         });
@@ -133,12 +139,14 @@ export class PaperTrader {
     this.checkExit(pos, token.lifecycle === "dead" || token.lifecycle === "failed");
   }
 
-  /** Exit on take-profit (3x), hard stop (-10%), or dead. */
+  /** Exit: ride to 2x then trail 30% off the peak; hard stop -10%; or dead. */
   private checkExit(pos: Pos, dead: boolean): void {
+    if (pos.currentMc > pos.peakMc) pos.peakMc = pos.currentMc;
     const ratio = pos.entryMc > 0 ? pos.currentMc / pos.entryMc : 0;
-    if (ratio >= TP_MULT) this.close(pos.mint, "tp");
-    else if (ratio <= SL_MULT) this.close(pos.mint, "stop");
-    else if (dead) this.close(pos.mint, "dead");
+    if (ratio <= SL_MULT) { this.close(pos.mint, "stop"); return; }
+    if (!pos.riding && ratio >= RIDE_TRIGGER) pos.riding = true;
+    if (pos.riding && pos.currentMc <= pos.peakMc * (1 - TRAIL_FRAC)) { this.close(pos.mint, "trail"); return; }
+    if (dead) this.close(pos.mint, "dead");
   }
 
   private close(mint: string, reason: string): void {
