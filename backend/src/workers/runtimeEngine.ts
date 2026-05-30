@@ -25,6 +25,7 @@ import { ClickHouseReadySink, LocalAnalyticsSink } from "../services/scale/analy
 import { KafkaReadyQueueAdapter, RedisStreamsQueueAdapter } from "../services/scale/queueAdapter.js";
 import { detectMarketSignals } from "../services/signals/marketSignals.js";
 import { PaperTrader } from "../services/paper/paperTrader.js";
+import { PlaybookStrategy } from "../services/intelligence/playbookStrategy.js";
 import { RuntimeState } from "../state/runtimeState.js";
 import type { CanonicalEvent, ProbabilityRecord, TokenState } from "../types.js";
 
@@ -81,6 +82,7 @@ export class RuntimeEngine {
   private lastHeavyAt = 0;
   private readonly lastAuxAt = new Map<string, number>();
   private readonly paper = new PaperTrader();
+  private readonly playbook = new PlaybookStrategy();
   private calibration: CalibrationReport = { sampleSize: 0, brierScore: 0, precision: 0, recall: 0, driftDelta: 0 };
 
   constructor(poolAvailable: boolean, private readonly redis: Redis | null, private readonly ingestIntervalMs: number, private readonly snapshotIntervalMs: number, repo: RuntimeRepo) {
@@ -130,8 +132,8 @@ export class RuntimeEngine {
     }, 3_000);
   }
 
-  startPaper(): void { this.paper.start(); }
-  stopPaper(): void { this.paper.stop(); }
+  startPaper(): void { this.paper.start(); this.playbook.setEnabled(true); }
+  stopPaper(): void { this.paper.stop(); this.playbook.setEnabled(false); }
   resetPaper(): void { this.paper.reset(); }
   paperState() { return this.paper.state(); }
 
@@ -185,6 +187,7 @@ export class RuntimeEngine {
       token.probabilityRug = Math.max(token.probabilityRug, 90);
       token.exitSignal = "dead";
       token.action = "DEAD";
+      this.playbook.forget(token.mint);
       this.state.tokens.set(token.mint, token);
       void this.repo.upsertToken(token);
       onBroadcast("tokenUpdate", token);
@@ -399,8 +402,10 @@ export class RuntimeEngine {
         if (event.type === "trade") void this.repo.insertTrade(event);
         if (!token) continue; // trade/migration on unknown mint — skip
         if (event.type === "trade") {
-          const leaderSell = event.side === "sell" && this.state.alphaWallets.has(event.wallet);
-          this.paper.onTrade(token, event, leaderSell);
+          // Update the playbook's early-window state and maybe fire its BUY,
+          // then let the paper bot act (entry on playbookBuy, exit TP3x/SL-10%).
+          this.playbook.observe(token, event);
+          this.paper.onTrade(token, event);
         }
         // Force-persist the graduation label immediately — it's a rare, terminal
         // positive outcome we must never drop to the aux-write throttle.

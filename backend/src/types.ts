@@ -46,6 +46,12 @@ export interface TokenState {
   peakAt: string; // timestamp of the all-time-high market cap
   lastTradeAt: string; // timestamp of the most recent observed trade
   smartMoneyBuys: number; // distinct proven-predictive ("alpha") wallets that bought
+  // Playbook strategy (validated in scripts/playbook.mjs): cheap-entry winner-
+  // score, avoid bundled/serial-sprayed coins, exit TP3x/SL-10%. Forward-tested
+  // live by the paper bot.
+  playbookScore?: number; // 0-1 live winner-score
+  playbookBuy?: boolean; // entry conditions met (the BUY trigger)
+  playbookEntryMc?: number; // MC at the moment the BUY fired
 }
 
 export interface WalletProfile {

@@ -4,15 +4,14 @@ import type { CanonicalEvent, TokenState } from "../../types.js";
  * Paper trading bot. Trades the live signals with fake money so we can watch how
  * they would actually perform — no real funds at risk.
  *
- * Strategy = the validated COPY-TRADE edge (scripts/copytrade.mjs):
- *   ENTRY: ACTION = BUY, i.e. ≥2 proven-profitable "leader" wallets bought the
- *          coin while still fresh. Fixed size, once per mint.
- *   EXIT : whichever comes first —
- *          • leader sell  — a tracked leader wallet sells the coin (copy exit)
- *          • time-stop    — held longer than HOLD_STOP_MS without a leader exit
- *          • dead         — token flagged dead/failed
+ * Strategy = the validated PLAYBOOK edge (scripts/playbook.mjs, the only config
+ * that survived out-of-sample + slippage stress):
+ *   ENTRY: token.playbookBuy — set by PlaybookStrategy when a cheap (≤$12k) coin
+ *          crosses the top-5% winner-score and is NOT bundled / serial-sprayed.
+ *   EXIT : take profit at 3×, hard stop at −10%, or token flagged dead.
  *
  * Position value is marked to market from the token's current market cap.
+ * Round-trip cost is a conservative 6% (matches the validated backtest).
  */
 
 export interface PaperPosition {
@@ -60,8 +59,9 @@ export interface PaperState {
 const STARTING_BALANCE = 10; // SOL
 const BET_SIZE = 0.5; // SOL per position
 const MAX_OPEN = 12;
-const EXIT_FEE = 0.96; // 4% round-trip fee+slippage (matches the copytrade backtest)
-const HOLD_STOP_MS = 120_000; // exit if no leader has sold within 2 minutes
+const EXIT_FEE = 0.94; // 6% round-trip fee+slippage (conservative; matches playbook backtest)
+const TP_MULT = 3.0; // take profit at 3x
+const SL_MULT = 0.9; // hard stop at -10%
 
 interface Pos {
   mint: string;
@@ -70,7 +70,6 @@ interface Pos {
   currentMc: number;
   solIn: number;
   entryAt: string;
-  entryTsMs: number;
 }
 
 export class PaperTrader {
@@ -98,41 +97,45 @@ export class PaperTrader {
     this.trades.length = 0;
   }
 
-  /** Tick (every few seconds): entries on BUY + time-stop / dead exits. */
+  /** Tick (every few seconds): entries on playbook BUY + exit checks. */
   onToken(token: TokenState): void {
     const pos = this.positions.get(token.mint);
     if (pos) {
       if (token.marketCap > 0) pos.currentMc = token.marketCap;
-      if (token.lifecycle === "dead" || token.lifecycle === "failed" || token.action === "DEAD") {
-        this.close(token.mint, "dead");
-      } else if (Date.now() - pos.entryTsMs >= HOLD_STOP_MS) {
-        this.close(token.mint, "timestop");
-      }
+      this.checkExit(pos, token.lifecycle === "dead" || token.lifecycle === "failed" || token.action === "DEAD");
       return;
     }
-    if (this.enabled && token.action === "BUY" && !this.traded.has(token.mint) && token.marketCap > 0) {
-      if (this.cash >= BET_SIZE && this.positions.size < MAX_OPEN) {
+    if (this.enabled && token.playbookBuy && !this.traded.has(token.mint)) {
+      const entryMc = token.playbookEntryMc && token.playbookEntryMc > 0 ? token.playbookEntryMc : token.marketCap;
+      if (entryMc > 0 && this.cash >= BET_SIZE && this.positions.size < MAX_OPEN) {
         this.cash -= BET_SIZE;
         this.positions.set(token.mint, {
           mint: token.mint,
           symbol: token.symbol || token.mint.slice(0, 6),
-          entryMc: token.marketCap,
-          currentMc: token.marketCap,
+          entryMc,
+          currentMc: token.marketCap > 0 ? token.marketCap : entryMc,
           solIn: BET_SIZE,
           entryAt: new Date().toISOString(),
-          entryTsMs: Date.now(),
         });
         this.traded.add(token.mint);
       }
     }
   }
 
-  /** Per-trade copy exit: bail when a tracked leader wallet sells the coin. */
-  onTrade(token: TokenState, event: CanonicalEvent, leaderSell: boolean): void {
+  /** Per-trade: mark to market and check TP/SL immediately (faster than the tick). */
+  onTrade(token: TokenState, event: CanonicalEvent): void {
     const pos = this.positions.get(event.mint);
     if (!pos) return;
     if (token.marketCap > 0) pos.currentMc = token.marketCap;
-    if (leaderSell) this.close(pos.mint, "leadersell");
+    this.checkExit(pos, token.lifecycle === "dead" || token.lifecycle === "failed");
+  }
+
+  /** Exit on take-profit (3x), hard stop (-10%), or dead. */
+  private checkExit(pos: Pos, dead: boolean): void {
+    const ratio = pos.entryMc > 0 ? pos.currentMc / pos.entryMc : 0;
+    if (ratio >= TP_MULT) this.close(pos.mint, "tp");
+    else if (ratio <= SL_MULT) this.close(pos.mint, "stop");
+    else if (dead) this.close(pos.mint, "dead");
   }
 
   private close(mint: string, reason: string): void {
