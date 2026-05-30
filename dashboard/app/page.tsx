@@ -548,7 +548,7 @@ function Stat({ label, value, color }: { label: string; value: string; color?: s
 }
 
 // ─── PRICE CHART (dependency-free SVG) ───────────────────────────────────────
-function PriceChart({ mint, entryMc, exitMc }: { mint: string; entryMc?: number; exitMc?: number }): ReactElement {
+function PriceChart({ mint, entryMc, exitMc, height = 120 }: { mint: string; entryMc?: number; exitMc?: number; height?: number }): ReactElement {
   const [pts, setPts] = useState<{ t: number; mc: number }[]>([]);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
@@ -575,7 +575,7 @@ function PriceChart({ mint, entryMc, exitMc }: { mint: string; entryMc?: number;
   if (loading) return <div className="dim" style={{ fontSize: 11, padding: 12 }}>loading price history…</div>;
   if (pts.length < 2) return <div className="dim" style={{ fontSize: 11, padding: 12 }}>not enough trade history to chart yet</div>;
 
-  const W = 320, H = 120, PAD = 4;
+  const W = 320, H = height, PAD = 4;
   const mcs = pts.map(p => p.mc);
   let minMc = Math.min(...mcs), maxMc = Math.max(...mcs);
   for (const v of [entryMc, exitMc]) { if (v && v > 0) { minMc = Math.min(minMc, v); maxMc = Math.max(maxMc, v); } }
@@ -586,7 +586,7 @@ function PriceChart({ mint, entryMc, exitMc }: { mint: string; entryMc?: number;
   const up = pts[pts.length - 1].mc >= pts[0].mc;
   return (
     <div>
-      <svg width="100%" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: "block", background: "var(--bg-3)", border: "1px solid var(--border)" }}>
+      <svg width="100%" height={height} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: "block", background: "var(--bg-3)", border: "1px solid var(--border)" }}>
         {entryMc && entryMc > 0 && <line x1={0} x2={W} y1={y(entryMc)} y2={y(entryMc)} stroke="var(--green)" strokeWidth={0.6} strokeDasharray="3 2" opacity={0.7} />}
         {exitMc && exitMc > 0 && <line x1={0} x2={W} y1={y(exitMc)} y2={y(exitMc)} stroke="var(--red)" strokeWidth={0.6} strokeDasharray="3 2" opacity={0.7} />}
         <path d={path} fill="none" stroke={up ? "var(--green)" : "var(--red)"} strokeWidth={1.2} vectorEffect="non-scaling-stroke" />
@@ -644,7 +644,7 @@ function TokenView({ token, onSelectToken, paper }: { token: TokenState | null; 
   const chartExit = lastTrade?.exitMc;
 
   return (
-    <div className="view" style={{ display: "grid", gridTemplateRows: "auto 1fr", height: "100%", background: "var(--bg)", overflow: "hidden" }}>
+    <div className="view" style={{ display: "grid", gridTemplateRows: "auto auto 1fr", height: "100%", background: "var(--bg)", overflow: "hidden" }}>
       {/* token header */}
       <div style={{ borderBottom: "1px solid var(--border)", padding: "14px 16px", display: "grid", gridTemplateColumns: "1fr auto auto auto auto", gap: 24, alignItems: "center", background: "var(--bg-1)" }}>
         <div>
@@ -687,6 +687,26 @@ function TokenView({ token, onSelectToken, paper }: { token: TokenState | null; 
             <div className="dim" style={{ fontSize: 10 }}>weighted score</div>
           </div>
         </div>
+      </div>
+
+      {/* full-width price chart */}
+      <div style={{ borderBottom: "1px solid var(--border)", background: "var(--bg-1)", padding: "12px 16px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8, gap: 16, flexWrap: "wrap" }}>
+          <span className="ascii-h">PRICE (MARKET CAP) · {pos ? "IN POSITION" : lastTrade ? "CLOSED" : "history"}</span>
+          {(pos || lastTrade) && (
+            <div style={{ display: "flex", gap: 22, alignItems: "baseline" }}>
+              <Stat label="ENTRY MC" value={`$${fmtMC((pos?.entryMc ?? lastTrade?.entryMc) || 0)}`} />
+              {pos
+                ? <Stat label={pos.riding ? "NOW · RIDING" : "NOW"} value={`$${fmtMC(pos.currentMc)}`} color={pos.pnlPct >= 0 ? "var(--green)" : "var(--red)"} />
+                : <Stat label={`EXIT · ${exitLabel(lastTrade!.reason)}`} value={`$${fmtMC(lastTrade!.exitMc)}`} color={lastTrade!.pnl >= 0 ? "var(--green)" : "var(--red)"} />}
+              <Stat label="PEAK MC" value={`$${fmtMC(pos?.peakMc ?? lastTrade?.exitMc ?? 0)}`} />
+              <Stat label="P&L" value={`${((pos?.pnlPct ?? lastTrade?.pnlPct) ?? 0) > 0 ? "+" : ""}${((pos?.pnlPct ?? lastTrade?.pnlPct) ?? 0).toFixed(0)}%`} color={((pos?.pnlPct ?? lastTrade?.pnlPct) ?? 0) >= 0 ? "var(--green)" : "var(--red)"} />
+              {token.playbookScore != null && <Stat label="WINNER SCORE" value={`${(token.playbookScore * 100).toFixed(0)}`} color={token.playbookScore >= 0.5 ? "var(--green)" : "var(--text-2)"} />}
+              <Stat label="SIZE" value={`${(pos?.solIn ?? lastTrade?.solIn ?? 0).toFixed(2)}◎`} />
+            </div>
+          )}
+        </div>
+        <PriceChart mint={token.mint} entryMc={chartEntry} exitMc={chartExit} height={260} />
       </div>
 
       {/* body */}
@@ -774,24 +794,6 @@ function TokenView({ token, onSelectToken, paper }: { token: TokenState | null; 
           <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
             {innerTab === "signals" && (
               <div style={{ padding: 12 }}>
-                <div style={{ marginBottom: 14 }}>
-                  <div className="ascii-h">PRICE (MARKET CAP) · {pos ? "IN POSITION" : lastTrade ? "CLOSED" : "history"}</div>
-                  <div style={{ marginTop: 6 }}>
-                    <PriceChart mint={token.mint} entryMc={chartEntry} exitMc={chartExit} />
-                  </div>
-                  {(pos || lastTrade) && (
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginTop: 8 }}>
-                      <Stat label="ENTRY MC" value={`$${fmtMC((pos?.entryMc ?? lastTrade?.entryMc) || 0)}`} />
-                      {pos
-                        ? <Stat label={pos.riding ? "NOW · RIDING" : "NOW"} value={`$${fmtMC(pos.currentMc)}`} color={pos.pnlPct >= 0 ? "var(--green)" : "var(--red)"} />
-                        : <Stat label={`EXIT · ${exitLabel(lastTrade!.reason)}`} value={`$${fmtMC(lastTrade!.exitMc)}`} color={lastTrade!.pnl >= 0 ? "var(--green)" : "var(--red)"} />}
-                      <Stat label="PEAK MC" value={`$${fmtMC(pos?.peakMc ?? lastTrade?.exitMc ?? 0)}`} />
-                      <Stat label="P&L" value={`${((pos?.pnlPct ?? lastTrade?.pnlPct) ?? 0) > 0 ? "+" : ""}${((pos?.pnlPct ?? lastTrade?.pnlPct) ?? 0).toFixed(0)}%`} color={((pos?.pnlPct ?? lastTrade?.pnlPct) ?? 0) >= 0 ? "var(--green)" : "var(--red)"} />
-                      {token.playbookScore != null && <Stat label="WINNER SCORE" value={`${(token.playbookScore * 100).toFixed(0)}`} color={token.playbookScore >= 0.5 ? "var(--green)" : "var(--text-2)"} />}
-                      <Stat label="SIZE" value={`${(pos?.solIn ?? lastTrade?.solIn ?? 0).toFixed(2)}◎`} />
-                    </div>
-                  )}
-                </div>
                 <div style={{ marginBottom: 12 }}>
                   <div className="ascii-h">INSIDER CONCENTRATION</div>
                   <div style={{ height: 8, background: "var(--bg-3)", marginTop: 6 }}>
