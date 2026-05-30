@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, CSSProperties } from "react";
-import type { AlertEvent, AlertRule, DeveloperStat, PaperState, TokenState, WalletProfile } from "../lib/contracts";
+import type { AlertEvent, AlertRule, DeveloperStat, PaperLifetime, PaperState, PaperTrade, TokenState, WalletProfile } from "../lib/contracts";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8080";
 const WS_BASE = API_BASE.startsWith("https://")
@@ -472,6 +472,30 @@ function PaperBotPanel({ paper, onControl, onSelectToken, tokens }: {
   const ret = paper?.totalReturnPct ?? 0;
   const retColor = ret > 0 ? "var(--green)" : ret < 0 ? "var(--red)" : "var(--text-2)";
   const openByMint = (mint: string) => tokens.find(t => t.mint === mint);
+
+  // Durable history (survives restarts) — fetched from Postgres, refreshed when
+  // the live trade count changes or every 30s.
+  const [lifetime, setLifetime] = useState<PaperLifetime | null>(null);
+  const [history, setHistory] = useState<PaperTrade[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const tradeCount = paper?.tradeCount ?? 0;
+  useEffect(() => {
+    let cancel = false;
+    const load = () => {
+      fetch(`${API_BASE}/api/paper/history`)
+        .then(r => r.json())
+        .then((j: { trades?: PaperTrade[]; lifetime?: PaperLifetime }) => {
+          if (cancel) return;
+          setHistory(j.trades ?? []);
+          setLifetime(j.lifetime ?? null);
+        })
+        .catch(() => { /* keep last good */ });
+    };
+    load();
+    const iv = setInterval(load, 30000);
+    return () => { cancel = true; clearInterval(iv); };
+  }, [tradeCount]);
+
   return (
     <div className="panel" style={{ flex: "0 0 auto", maxHeight: "52%", display: "flex", flexDirection: "column", minHeight: 0 }}>
       <div className="panel-hdr" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -501,6 +525,15 @@ function PaperBotPanel({ paper, onControl, onSelectToken, tokens }: {
           <Stat label="WIN RATE" value={paper && paper.tradeCount > 0 ? `${Math.round(paper.winRate * 100)}%` : "—"} />
           <Stat label="TRADES" value={`${paper?.tradeCount ?? 0} (${paper?.wins ?? 0}/${paper?.losses ?? 0})`} />
         </div>
+        {/* lifetime (durable; survives restarts) */}
+        {lifetime && lifetime.trades > 0 && (
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "var(--text-3)", padding: "2px 2px 0", letterSpacing: "0.04em" }}>
+            <span>LIFETIME {lifetime.trades} trades · {Math.round((lifetime.wins / Math.max(1, lifetime.trades)) * 100)}% win</span>
+            <span style={{ color: lifetime.realizedPnl >= 0 ? "var(--green)" : "var(--red)" }}>
+              {lifetime.realizedPnl >= 0 ? "+" : ""}{lifetime.realizedPnl.toFixed(2)}◎ · best +{lifetime.bestPnl.toFixed(2)} / worst {lifetime.worstPnl.toFixed(2)}
+            </span>
+          </div>
+        )}
         {/* open positions */}
         <div style={{ overflow: "auto", minHeight: 0, flex: 1 }}>
           <div className="dim" style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", margin: "2px 0 4px" }}>
@@ -519,11 +552,18 @@ function PaperBotPanel({ paper, onControl, onSelectToken, tokens }: {
           ))}
           {(paper?.positions ?? []).length === 0 && <div className="dim" style={{ fontSize: 10 }}>no open positions</div>}
 
-          <div className="dim" style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", margin: "8px 0 4px" }}>
-            Recent closes
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "8px 0 4px" }}>
+            <span className="dim" style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+              {showHistory ? `Full history (${history.length})` : "Recent closes"}
+            </span>
+            {history.length > 0 && (
+              <span onClick={() => setShowHistory(s => !s)} style={{ fontSize: 9, color: "var(--accent, var(--green))", cursor: "pointer", letterSpacing: "0.04em" }}>
+                {showHistory ? "show recent" : `show all (${history.length})`}
+              </span>
+            )}
           </div>
-          {(paper?.trades ?? []).slice(0, 8).map((t, i) => (
-            <div key={t.mint + i} onClick={() => { const tok = openByMint(t.mint); if (tok) onSelectToken(tok); }} style={{ padding: "4px 0", borderBottom: "1px solid var(--border)", cursor: openByMint(t.mint) ? "pointer" : "default" }}>
+          {(showHistory ? history : (paper?.trades ?? []).slice(0, 8)).map((t, i) => (
+            <div key={t.mint + (t.exitAt || i)} onClick={() => { const tok = openByMint(t.mint); if (tok) onSelectToken(tok); }} style={{ padding: "4px 0", borderBottom: "1px solid var(--border)", cursor: openByMint(t.mint) ? "pointer" : "default" }}>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
                 <span className="fg">${t.symbol} <span className="dim" style={{ fontSize: 9 }}>{exitLabel(t.reason)}</span></span>
                 <span style={{ color: t.pnl >= 0 ? "var(--green)" : "var(--red)" }}>{t.pnl > 0 ? "+" : ""}{t.pnl.toFixed(2)}◎ <span style={{ fontSize: 9 }}>({t.pnlPct > 0 ? "+" : ""}{t.pnlPct.toFixed(0)}%)</span></span>
@@ -531,7 +571,7 @@ function PaperBotPanel({ paper, onControl, onSelectToken, tokens }: {
               <div className="dim" style={{ fontSize: 9, marginTop: 1 }}>${fmtMC(t.entryMc)} → ${fmtMC(t.exitMc)}</div>
             </div>
           ))}
-          {(paper?.trades ?? []).length === 0 && <div className="dim" style={{ fontSize: 10 }}>no closed trades yet</div>}
+          {(showHistory ? history : (paper?.trades ?? [])).length === 0 && <div className="dim" style={{ fontSize: 10 }}>no closed trades yet</div>}
         </div>
       </div>
     </div>

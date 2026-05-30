@@ -74,18 +74,27 @@ export async function loadDataset(argv = process.argv.slice(2)) {
   const tradesByMint = new Map();
   const sources = [];
 
+  // Intern repeated strings on the huge single-source path: ~44M trades share
+  // only a few unique sides and ~1-2M wallets, so interning + dropping unused
+  // fields (mint is the map key; tokenAmt/signature unused downstream) keeps the
+  // dataset in heap instead of OOMing on multi-GB exports.
+  const BUY = "buy", SELL = "sell";
+  const walletIntern = new Map();
+  const internWallet = (w) => { const s = walletIntern.get(w); if (s !== undefined) return s; walletIntern.set(w, w); return w; };
+
   const addTrade = (t) => {
     if (!t.wallet || t.wallet === "UNKNOWN_WALLET" || !t.mint) return;
+    let a = tradesByMint.get(t.mint);
     if (flags.dedup) {
       const k = tradeKey(t);
       if (tradeSeen.has(k)) return;
       tradeSeen.add(k);
-    } else {
-      t.signature = undefined; // not needed downstream; drop to save memory
+      if (!a) { a = []; tradesByMint.set(t.mint, a); }
+      a.push(t);
+      return;
     }
-    let a = tradesByMint.get(t.mint);
     if (!a) { a = []; tradesByMint.set(t.mint, a); }
-    a.push(t);
+    a.push({ wallet: internWallet(t.wallet), side: t.side === "buy" ? BUY : SELL, sol: t.sol, mc: t.mc, ts: t.ts });
   };
   const addToken = (tk) => { if (tk.mint && !tokens.has(tk.mint)) tokens.set(tk.mint, tk); };
   const addOutcome = (o) => {

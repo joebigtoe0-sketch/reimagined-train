@@ -158,6 +158,35 @@ CREATE TABLE IF NOT EXISTS token_outcomes (
   evaluated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Paper-trading bot: durable log of every closed trade (never capped) plus a
+-- single resumable state snapshot so a redeploy/restart resumes the run instead
+-- of wiping balance + open positions.
+CREATE TABLE IF NOT EXISTS paper_trades (
+  id BIGSERIAL PRIMARY KEY,
+  mint TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  sol_in NUMERIC NOT NULL,
+  sol_out NUMERIC NOT NULL,
+  pnl NUMERIC NOT NULL,
+  pnl_pct NUMERIC NOT NULL,
+  entry_mc NUMERIC NOT NULL,
+  exit_mc NUMERIC NOT NULL,
+  reason TEXT NOT NULL,
+  entry_at TIMESTAMPTZ,
+  exit_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS paper_state (
+  id TEXT PRIMARY KEY,
+  enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  cash NUMERIC NOT NULL,
+  realized_pnl NUMERIC NOT NULL,
+  wins INTEGER NOT NULL DEFAULT 0,
+  losses INTEGER NOT NULL DEFAULT 0,
+  positions JSONB NOT NULL DEFAULT '[]'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS alert_rules (
   id BIGSERIAL PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,

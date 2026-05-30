@@ -90,8 +90,30 @@ export class RuntimeEngine {
   private readonly playbook = new PlaybookStrategy();
   private calibration: CalibrationReport = { sampleSize: 0, brierScore: 0, precision: 0, recall: 0, driftDelta: 0 };
 
+  private lastPaperSaveAt = 0;
+
   constructor(poolAvailable: boolean, private readonly redis: Redis | null, private readonly ingestIntervalMs: number, private readonly snapshotIntervalMs: number, repo: RuntimeRepo) {
     this.repo = poolAvailable ? repo : new RuntimeRepo(null);
+    // Durably persist paper results: every closed trade + balance/position
+    // snapshots, so a redeploy/restart resumes the run instead of resetting.
+    this.paper.setStore({
+      persistTrade: (t) => void this.repo.insertPaperTrade(t).catch((err) => console.warn("[paper] trade persist failed:", err instanceof Error ? err.message : err)),
+      persistState: (s) => void this.repo.savePaperState(s).catch((err) => console.warn("[paper] state persist failed:", err instanceof Error ? err.message : err))
+    });
+  }
+
+  /** Restore a previously persisted paper run on boot (after migrations). */
+  async hydratePaper(): Promise<void> {
+    try {
+      const saved = await this.repo.loadPaperState();
+      if (!saved) return;
+      const recent = await this.repo.listPaperTrades(60);
+      this.paper.hydrate(saved, recent);
+      if (this.paper.isEnabled()) this.playbook.setEnabled(true);
+      console.log(`[paper] resumed run: cash=${saved.cash.toFixed(3)} realized=${saved.realizedPnl.toFixed(3)} open=${saved.positions.length} enabled=${saved.enabled}`);
+    } catch (err) {
+      console.warn("[paper] hydrate skipped:", err instanceof Error ? err.message : err);
+    }
   }
 
   start(onBroadcast: (type: string, payload: unknown) => void): void {
@@ -134,12 +156,16 @@ export class RuntimeEngine {
     this.paperTimer = setInterval(() => {
       for (const token of this.state.tokens.values()) this.paper.onToken(token);
       onBroadcast("paperUpdate", this.paper.state());
+      // Periodically checkpoint open positions marked-to-market so a restart
+      // resumes with fresh values (closes/entries already persist immediately).
+      const now = Date.now();
+      if (now - this.lastPaperSaveAt > 15_000) { this.lastPaperSaveAt = now; this.paper.saveState(); }
     }, 3_000);
   }
 
   startPaper(): void { this.paper.start(); this.playbook.setEnabled(true); }
   stopPaper(): void { this.paper.stop(); this.playbook.setEnabled(false); }
-  resetPaper(): void { this.paper.reset(); }
+  resetPaper(): void { void this.repo.clearPaperTrades().catch(() => {}); this.paper.reset(); }
   paperState() { return this.paper.state(); }
 
   private async refreshAlphaWallets(): Promise<void> {

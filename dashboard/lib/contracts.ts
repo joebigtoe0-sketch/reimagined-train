@@ -61,7 +61,16 @@ export type PaperTrade = {
   entryMc: number;
   exitMc: number;
   reason: string;
+  entryAt?: string;
   exitAt: string;
+};
+
+export type PaperLifetime = {
+  trades: number;
+  wins: number;
+  realizedPnl: number;
+  bestPnl: number;
+  worstPnl: number;
 };
 
 export type PaperState = {

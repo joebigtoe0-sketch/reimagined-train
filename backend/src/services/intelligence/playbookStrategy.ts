@@ -18,11 +18,11 @@ import type { CanonicalEvent, TokenState } from "../../types.js";
  */
 
 // ── embedded model (from scripts/strathunt.mjs, target 25k, 7 features) ───────
-const MEAN = [2.169528, 2.162350, 3.182991, 0.515254, 0.511217, 1.582736, 0.370023];
-const STD = [1.008290, 1.319759, 1.123969, 0.862261, 0.271999, 1.375810, 0.321195];
-const W = [-1.405720, 0.614847, 1.748346, 1.328486, 0.889240, 0.192148, -0.334048];
-const B = -1.394214;
-const TH = 0.497508; // top-20% entry threshold
+const MEAN = [2.167738, 2.223182, 3.120028, 0.532493, 0.512509, 1.541615, 0.406811];
+const STD = [0.993491, 1.358389, 1.110523, 0.861189, 0.276202, 1.265092, 0.331789];
+const W = [-1.214210, 0.371292, 1.981640, 1.212376, 0.965884, 0.354782, -0.128407];
+const B = -1.480783;
+const TH = 0.451710; // top-20% entry threshold (retrained on 20-day, 620k-token window)
 
 // ── strategy params (validated) ───────────────────────────────────────────────
 const ENTRY_MC_CAP = 12_000;     // only buy while still cheap

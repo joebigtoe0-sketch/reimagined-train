@@ -75,6 +75,10 @@ app.get<{ Params: { wallet: string } }>("/api/wallets/:wallet/positions", async 
   return { wallet: request.params.wallet, positions };
 });
 app.get("/api/paper", async () => ({ paper: engine.paperState() }));
+app.get("/api/paper/history", async () => {
+  const [trades, lifetime] = await Promise.all([repo.listPaperTrades(500), repo.paperLifetimeStats()]);
+  return { trades, lifetime };
+});
 app.post("/api/paper/start", async () => { engine.startPaper(); return { paper: engine.paperState() }; });
 app.post("/api/paper/stop", async () => { engine.stopPaper(); return { paper: engine.paperState() }; });
 app.post("/api/paper/reset", async () => { engine.resetPaper(); return { paper: engine.paperState() }; });
@@ -187,6 +191,7 @@ void (async () => {
   try {
     await runStartupMigrations();
     await assertRequiredTables(repo);
+    await engine.hydratePaper();
     await repo.upsertAlertRule({
       name: "continuation_drop",
       enabled: true,

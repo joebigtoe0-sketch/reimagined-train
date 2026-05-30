@@ -38,7 +38,28 @@ export interface PaperTrade {
   entryMc: number;
   exitMc: number;
   reason: string;
+  entryAt: string;
   exitAt: string;
+}
+
+/** Snapshot persisted to the DB so a restart resumes the run instead of resetting. */
+export interface PaperPersistedState {
+  enabled: boolean;
+  cash: number;
+  realizedPnl: number;
+  wins: number;
+  losses: number;
+  positions: PaperPosition[];
+}
+
+/**
+ * Durable store for paper results. Implemented by the runtime engine over the
+ * Postgres repo; kept as a narrow interface here so the trader stays decoupled
+ * from the DB layer. All methods are fire-and-forget (errors swallowed upstream).
+ */
+export interface PaperStore {
+  persistTrade(trade: PaperTrade): void;
+  persistState(state: PaperPersistedState): void;
 }
 
 export interface PaperState {
@@ -87,9 +108,13 @@ export class PaperTrader {
   private readonly positions = new Map<string, Pos>();
   private readonly traded = new Set<string>();
   private readonly trades: PaperTrade[] = [];
+  private store: PaperStore | null = null;
 
-  start(): void { this.enabled = true; }
-  stop(): void { this.enabled = false; }
+  /** Wire the durable store (Postgres-backed). Optional; trader works without it. */
+  setStore(store: PaperStore): void { this.store = store; }
+
+  start(): void { this.enabled = true; this.saveState(); }
+  stop(): void { this.enabled = false; this.saveState(); }
   isEnabled(): boolean { return this.enabled; }
 
   /** Mints we currently hold — must keep tracking their trades for TP/SL exits. */
@@ -104,6 +129,46 @@ export class PaperTrader {
     this.positions.clear();
     this.traded.clear();
     this.trades.length = 0;
+    this.saveState();
+  }
+
+  /** Restore a persisted run on boot so a redeploy resumes instead of resetting. */
+  hydrate(saved: PaperPersistedState, recentTrades: PaperTrade[]): void {
+    this.enabled = saved.enabled;
+    this.cash = saved.cash;
+    this.realizedPnl = saved.realizedPnl;
+    this.wins = saved.wins;
+    this.losses = saved.losses;
+    this.positions.clear();
+    this.traded.clear();
+    for (const p of saved.positions) {
+      this.positions.set(p.mint, {
+        mint: p.mint, symbol: p.symbol, entryMc: p.entryMc, currentMc: p.currentMc,
+        peakMc: p.peakMc, riding: p.riding, solIn: p.solIn, entryAt: p.entryAt,
+      });
+      this.traded.add(p.mint); // don't re-enter a coin we still hold
+    }
+    this.trades.length = 0;
+    for (const t of recentTrades) {
+      if (this.trades.length < 60) this.trades.push(t);
+      this.traded.add(t.mint); // don't re-enter a coin we already traded
+    }
+  }
+
+  /** Persist the current run snapshot (fire-and-forget via the store). */
+  saveState(): void {
+    if (!this.store) return;
+    const positions: PaperPosition[] = [];
+    for (const p of this.positions.values()) {
+      const ratio = p.entryMc > 0 ? p.currentMc / p.entryMc : 0;
+      const value = p.solIn * ratio;
+      positions.push({
+        mint: p.mint, symbol: p.symbol, entryMc: Math.round(p.entryMc), currentMc: Math.round(p.currentMc),
+        peakMc: Math.round(p.peakMc), riding: p.riding, solIn: p.solIn, value: round(value),
+        pnlPct: p.solIn > 0 ? round(((value - p.solIn) / p.solIn) * 100) : 0, entryAt: p.entryAt,
+      });
+    }
+    this.store.persistState({ enabled: this.enabled, cash: this.cash, realizedPnl: this.realizedPnl, wins: this.wins, losses: this.losses, positions });
   }
 
   /** Tick (every few seconds): entries on playbook BUY + exit checks. */
@@ -129,6 +194,7 @@ export class PaperTrader {
           entryAt: new Date().toISOString(),
         });
         this.traded.add(token.mint);
+        this.saveState();
       }
     }
   }
@@ -161,7 +227,7 @@ export class PaperTrader {
     this.realizedPnl += pnl;
     if (pnl >= 0) this.wins += 1;
     else this.losses += 1;
-    this.trades.unshift({
+    const trade: PaperTrade = {
       mint: pos.mint,
       symbol: pos.symbol,
       solIn: round(pos.solIn),
@@ -171,10 +237,15 @@ export class PaperTrader {
       entryMc: Math.round(pos.entryMc),
       exitMc: Math.round(pos.currentMc),
       reason,
+      entryAt: pos.entryAt,
       exitAt: new Date().toISOString(),
-    });
+    };
+    this.trades.unshift(trade);
     if (this.trades.length > 60) this.trades.length = 60;
     this.positions.delete(mint);
+    // Durably log the closed trade + the new balance/positions snapshot.
+    this.store?.persistTrade(trade);
+    this.saveState();
   }
 
   state(): PaperState {

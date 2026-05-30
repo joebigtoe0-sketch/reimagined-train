@@ -1,4 +1,5 @@
 import type { AlertEvent, AlertRule, CanonicalEvent, DeveloperProfile, ProbabilityRecord, TokenState, WalletProfile } from "../../types.js";
+import type { PaperPersistedState, PaperPosition, PaperTrade } from "../../services/paper/paperTrader.js";
 type QueryablePool = {
   query: (text: string, values?: unknown[]) => Promise<{ rows: unknown[] }>;
 };
@@ -426,6 +427,102 @@ export class RuntimeRepo {
        ON CONFLICT (name) DO UPDATE SET enabled=EXCLUDED.enabled, severity=EXCLUDED.severity, config=EXCLUDED.config, cooldown_seconds=EXCLUDED.cooldown_seconds, updated_at=now()`,
       [input.name, input.enabled, input.severity, JSON.stringify(input.config), input.cooldownSeconds]
     );
+  }
+
+  // ── Paper-trading persistence ───────────────────────────────────────────────
+  /** Append a closed paper trade to the durable (uncapped) log. */
+  async insertPaperTrade(t: PaperTrade): Promise<void> {
+    if (!this.pool) return;
+    await this.pool.query(
+      `INSERT INTO paper_trades (mint, symbol, sol_in, sol_out, pnl, pnl_pct, entry_mc, exit_mc, reason, entry_at, exit_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [t.mint, t.symbol, t.solIn, t.solOut, t.pnl, t.pnlPct, t.entryMc, t.exitMc, t.reason, t.entryAt || null, t.exitAt]
+    );
+  }
+
+  /** Upsert the single resumable paper-bot state snapshot (balance + open positions). */
+  async savePaperState(s: PaperPersistedState): Promise<void> {
+    if (!this.pool) return;
+    await this.pool.query(
+      `INSERT INTO paper_state (id, enabled, cash, realized_pnl, wins, losses, positions, updated_at)
+       VALUES ('live',$1,$2,$3,$4,$5,$6::jsonb, now())
+       ON CONFLICT (id) DO UPDATE SET
+         enabled=EXCLUDED.enabled, cash=EXCLUDED.cash, realized_pnl=EXCLUDED.realized_pnl,
+         wins=EXCLUDED.wins, losses=EXCLUDED.losses, positions=EXCLUDED.positions, updated_at=now()`,
+      [s.enabled, s.cash, s.realizedPnl, s.wins, s.losses, JSON.stringify(s.positions)]
+    );
+  }
+
+  /** Load the resumable paper-bot state snapshot, or null if none saved yet. */
+  async loadPaperState(): Promise<PaperPersistedState | null> {
+    const rows = await this.rawQuery<{
+      enabled: boolean; cash: number; realized_pnl: number; wins: number; losses: number; positions: PaperPosition[];
+    }>(`SELECT enabled, cash, realized_pnl, wins, losses, positions FROM paper_state WHERE id = 'live'`);
+    const r = rows[0];
+    if (!r) return null;
+    return {
+      enabled: !!r.enabled,
+      cash: Number(r.cash ?? 0),
+      realizedPnl: Number(r.realized_pnl ?? 0),
+      wins: Number(r.wins ?? 0),
+      losses: Number(r.losses ?? 0),
+      positions: Array.isArray(r.positions) ? r.positions : []
+    };
+  }
+
+  /** Most recent closed paper trades (durable history, newest first). */
+  async listPaperTrades(limit = 200): Promise<PaperTrade[]> {
+    const rows = await this.rawQuery<{
+      mint: string; symbol: string; sol_in: number; sol_out: number; pnl: number; pnl_pct: number;
+      entry_mc: number; exit_mc: number; reason: string; entry_at: string | null; exit_at: string;
+    }>(
+      `SELECT mint, symbol, sol_in, sol_out, pnl, pnl_pct, entry_mc, exit_mc, reason, entry_at, exit_at
+       FROM paper_trades ORDER BY exit_at DESC LIMIT $1`,
+      [limit]
+    );
+    return rows.map((r) => ({
+      mint: r.mint,
+      symbol: r.symbol,
+      solIn: Number(r.sol_in ?? 0),
+      solOut: Number(r.sol_out ?? 0),
+      pnl: Number(r.pnl ?? 0),
+      pnlPct: Number(r.pnl_pct ?? 0),
+      entryMc: Number(r.entry_mc ?? 0),
+      exitMc: Number(r.exit_mc ?? 0),
+      reason: r.reason,
+      entryAt: r.entry_at ?? "",
+      exitAt: r.exit_at
+    }));
+  }
+
+  /** Aggregate lifetime paper stats straight from the durable trade log. */
+  async paperLifetimeStats(): Promise<{ trades: number; wins: number; realizedPnl: number; bestPnl: number; worstPnl: number }> {
+    const rows = await this.rawQuery<{ trades: string; wins: string; realized: number; best: number; worst: number }>(
+      `SELECT count(*)::text AS trades,
+              count(*) FILTER (WHERE pnl >= 0)::text AS wins,
+              COALESCE(sum(pnl),0)::float8 AS realized,
+              COALESCE(max(pnl),0)::float8 AS best,
+              COALESCE(min(pnl),0)::float8 AS worst
+       FROM paper_trades`
+    );
+    const r = rows[0];
+    return {
+      trades: Number(r?.trades ?? 0),
+      wins: Number(r?.wins ?? 0),
+      realizedPnl: Number(r?.realized ?? 0),
+      bestPnl: Number(r?.best ?? 0),
+      worstPnl: Number(r?.worst ?? 0)
+    };
+  }
+
+  /**
+   * Wipe the durable paper trade log (used by the reset endpoint). The state
+   * snapshot is not deleted here — reset() rewrites it to a fresh zeroed row via
+   * saveState(), which avoids a delete/upsert race against the fire-and-forget save.
+   */
+  async clearPaperTrades(): Promise<void> {
+    if (!this.pool) return;
+    await this.pool.query(`DELETE FROM paper_trades`);
   }
 
   async rawQuery<T = unknown>(text: string, values?: unknown[]): Promise<T[]> {
