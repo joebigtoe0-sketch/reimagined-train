@@ -75,6 +75,11 @@ export interface LiveState {
   trades: LiveTrade[];
 }
 
+// Max sell attempts before giving up and abandoning the position.
+const MAX_SELL_ATTEMPTS = 5;
+// Minimum milliseconds between sell attempts (doubles each failure, caps at 60s).
+const SELL_BACKOFF_BASE_MS = 8_000;
+
 interface Pos {
   mint: string;
   symbol: string;
@@ -85,7 +90,9 @@ interface Pos {
   solIn: number;
   entryAt: string;
   txBuy?: string;
-  selling: boolean; // guard: tx already in-flight
+  selling: boolean;       // true while a sell tx is in-flight
+  sellAttempts: number;   // total sell attempts so far
+  nextSellAt: number;     // epoch ms: don't retry before this time
 }
 
 export class LiveTrader {
@@ -176,7 +183,7 @@ export class LiveTrader {
     try {
       const result = await this.executor.execute("buy", token.mint, BET_SIZE);
       const mc = token.marketCap > 0 ? token.marketCap : entryMc;
-      this.positions.set(token.mint, {
+        this.positions.set(token.mint, {
         mint: token.mint,
         symbol: token.symbol || token.mint.slice(0, 6),
         entryMc,
@@ -187,16 +194,25 @@ export class LiveTrader {
         entryAt: new Date().toISOString(),
         txBuy: result.signature,
         selling: false,
+        sellAttempts: 0,
+        nextSellAt: 0,
       });
       console.log(`[LiveTrader] BUY  $${token.symbol} @ $${Math.round(entryMc)}  tx:${result.signature.slice(0, 12)}…`);
     } catch (err) {
-      console.error(`[LiveTrader] BUY failed $${token.symbol}:`, err instanceof Error ? err.message : err);
-      this.traded.delete(token.mint); // allow a retry next tick
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[LiveTrader] BUY failed $${token.symbol}: ${msg}`);
+      // Only un-gate if it was a transient error we might recover from.
+      // For 429 keep it gated (the token window will have passed anyway).
+      if (!msg.includes("429")) {
+        this.traded.delete(token.mint);
+      }
     }
   }
 
   private checkExit(pos: Pos, dead: boolean): void {
     if (pos.selling) return;
+    // Respect the exponential-backoff window between sell attempts.
+    if (Date.now() < pos.nextSellAt) return;
     if (pos.currentMc > pos.peakMc) pos.peakMc = pos.currentMc;
     const ratio = pos.entryMc > 0 ? pos.currentMc / pos.entryMc : 0;
 
@@ -212,36 +228,58 @@ export class LiveTrader {
   private async executeSell(pos: Pos, reason: string): Promise<void> {
     if (!this.executor || pos.selling) return;
     pos.selling = true;
+    pos.sellAttempts += 1;
+
     try {
       const result = await this.executor.execute("sell", pos.mint, "100%");
       const ratio = pos.entryMc > 0 ? pos.currentMc / pos.entryMc : 0;
-      // Estimate SOL out from the mark-to-market ratio (actual may differ slightly)
       const solOut = round(pos.solIn * ratio * 0.94);
       const pnl = round(solOut - pos.solIn);
       this.dailyPnl += pnl;
       if (pnl >= 0) this.wins += 1; else this.losses += 1;
       const trade: LiveTrade = {
-        mint: pos.mint,
-        symbol: pos.symbol,
-        solIn: round(pos.solIn),
-        solOut,
-        pnl,
+        mint: pos.mint, symbol: pos.symbol,
+        solIn: round(pos.solIn), solOut, pnl,
         pnlPct: pos.solIn > 0 ? round((pnl / pos.solIn) * 100) : 0,
-        entryMc: Math.round(pos.entryMc),
-        exitMc: Math.round(pos.currentMc),
-        reason,
-        entryAt: pos.entryAt,
-        exitAt: new Date().toISOString(),
-        txBuy: pos.txBuy,
-        txSell: result.signature,
+        entryMc: Math.round(pos.entryMc), exitMc: Math.round(pos.currentMc),
+        reason, entryAt: pos.entryAt, exitAt: new Date().toISOString(),
+        txBuy: pos.txBuy, txSell: result.signature,
       };
       this.trades.unshift(trade);
       if (this.trades.length > 60) this.trades.length = 60;
       this.positions.delete(pos.mint);
       console.log(`[LiveTrader] SELL $${pos.symbol} (${reason})  pnl:${pnl > 0 ? "+" : ""}${pnl.toFixed(3)}◎  tx:${result.signature.slice(0, 12)}…`);
     } catch (err) {
-      console.error(`[LiveTrader] SELL failed $${pos.symbol} (${reason}):`, err instanceof Error ? err.message : err);
-      pos.selling = false; // allow retry on next tick
+      const msg = err instanceof Error ? err.message : String(err);
+      const is429 = msg.includes("429");
+
+      if (pos.sellAttempts >= MAX_SELL_ATTEMPTS) {
+        // Give up — we can't sell this position. Log it as a write-off and remove.
+        console.error(`[LiveTrader] SELL $${pos.symbol} — gave up after ${pos.sellAttempts} attempts, abandoning position. Last error: ${msg}`);
+        const trade: LiveTrade = {
+          mint: pos.mint, symbol: pos.symbol,
+          solIn: round(pos.solIn), solOut: 0, pnl: round(-pos.solIn),
+          pnlPct: -100,
+          entryMc: Math.round(pos.entryMc), exitMc: Math.round(pos.currentMc),
+          reason: `${reason}:abandoned`, entryAt: pos.entryAt, exitAt: new Date().toISOString(),
+          txBuy: pos.txBuy,
+        };
+        this.dailyPnl += trade.pnl;
+        this.losses += 1;
+        this.trades.unshift(trade);
+        if (this.trades.length > 60) this.trades.length = 60;
+        this.positions.delete(pos.mint);
+        return;
+      }
+
+      // Exponential backoff: 8s, 16s, 32s, 64s (capped at 60s for 429, 30s otherwise)
+      const backoffMs = Math.min(
+        is429 ? 60_000 : 30_000,
+        SELL_BACKOFF_BASE_MS * Math.pow(2, pos.sellAttempts - 1)
+      );
+      pos.nextSellAt = Date.now() + backoffMs;
+      pos.selling = false;
+      console.warn(`[LiveTrader] SELL failed $${pos.symbol} attempt ${pos.sellAttempts}/${MAX_SELL_ATTEMPTS} (retry in ${backoffMs / 1000}s): ${msg}`);
     }
   }
 
