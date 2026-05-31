@@ -62,6 +62,11 @@ export class PumpPortalAdapter implements IngestionSource {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private awaitingPong = false;
+  // RPC endpoints on cooldown after a key/quota error: url → cooldown-until timestamp
+  private readonly rpcCooldowns = new Map<string, number>();
+  // Retrocheck concurrency limiter — avoid hammering Alchemy when tokens burst
+  private retrochecksInFlight = 0;
+  private readonly retrochecksQueue: Array<() => Promise<void>> = [];
   // Debug: tracks recently-created mints so we can log what arrives within 3s
   private _debugWindows = new Map<string, { createdAt: number; devWallet: string }>();
 
@@ -371,24 +376,73 @@ export class PumpPortalAdapter implements IngestionSource {
     devWallet: string,
     createdAtMs: number
   ): Promise<void> {
-    const rpcCandidates: string[] = [];
+    const label = (u: string) =>
+      u.includes("alchemy") ? "Alchemy" : u.includes("helius") ? "Helius" : "PublicRPC";
+
+    const now = Date.now();
+    const allCandidates: string[] = [];
     if (env.HELIUS_RPC_URL && !env.HELIUS_RPC_URL.endsWith("api-key=")) {
-      rpcCandidates.push(env.HELIUS_RPC_URL);
+      allCandidates.push(env.HELIUS_RPC_URL);
     }
-    if (env.ALCHEMY_API) rpcCandidates.push(env.ALCHEMY_API);
-    rpcCandidates.push("https://api.mainnet-beta.solana.com");
+    if (env.ALCHEMY_API) allCandidates.push(env.ALCHEMY_API);
+    allCandidates.push("https://api.mainnet-beta.solana.com");
 
-    console.log(`[Retrocheck ${mint.slice(0, 8)}] RPC candidates: ${rpcCandidates.map(u => u.includes("alchemy") ? "Alchemy" : u.includes("helius") ? "Helius" : "PublicRPC").join(" → ")}`);
+    // Skip endpoints still in their cooldown window
+    const rpcCandidates = allCandidates.filter((u) => {
+      const coolUntil = this.rpcCooldowns.get(u) ?? 0;
+      return now >= coolUntil;
+    });
 
-    for (const rpcUrl of rpcCandidates) {
-      try {
-        await this._rpcRetrocheck(rpcUrl, mint, devWallet, createdAtMs);
-        return;
-      } catch (err) {
-        console.warn(`[Retrocheck ${mint.slice(0, 8)}] ${rpcUrl.includes("alchemy") ? "Alchemy" : rpcUrl.includes("helius") ? "Helius" : "PublicRPC"} failed: ${(err as Error).message} — trying next`);
+    if (rpcCandidates.length === 0) {
+      console.warn(`[Retrocheck ${mint.slice(0, 8)}] all RPC endpoints on cooldown — skipping`);
+      return;
+    }
+
+    // Enqueue with concurrency cap — max 2 retrochecks at once to protect Alchemy
+    await this._enqueueRetrocheck(async () => {
+      for (const rpcUrl of rpcCandidates) {
+        try {
+          await this._rpcRetrocheck(rpcUrl, mint, devWallet, createdAtMs);
+          return;
+        } catch (err) {
+          const msg = (err as Error).message ?? "";
+          // Key/quota errors → 5-min cooldown (buying credits clears it after next deploy or cooldown)
+          // Rate-limit errors → 30-sec cooldown
+          const isKeyError  = msg.includes("Invalid API key") || msg.includes("401") || msg.includes("403");
+          const isRateError = msg.includes("compute units") || msg.includes("Too many requests") || msg.includes("429");
+          const coolMs      = isKeyError ? 5 * 60_000 : isRateError ? 30_000 : 15_000;
+          this.rpcCooldowns.set(rpcUrl, Date.now() + coolMs);
+          console.warn(`[Retrocheck ${mint.slice(0, 8)}] ${label(rpcUrl)} failed (${isKeyError ? "key error" : isRateError ? "rate limit" : "error"}, ${coolMs / 1000}s cooldown): ${msg}`);
+        }
       }
+      console.warn(`[Retrocheck ${mint.slice(0, 8)}] all RPC endpoints failed`);
+    });
+  }
+
+  private async _enqueueRetrocheck(fn: () => Promise<void>): Promise<void> {
+    const MAX_CONCURRENT = 2;
+    if (this.retrochecksInFlight < MAX_CONCURRENT) {
+      this.retrochecksInFlight++;
+      try { await fn(); } finally {
+        this.retrochecksInFlight--;
+        this._drainRetrochecksQueue();
+      }
+    } else {
+      // Queue and let drain handle it — don't await (fire-and-forget)
+      this.retrochecksQueue.push(fn);
     }
-    console.warn(`[Retrocheck ${mint.slice(0, 8)}] all RPC endpoints failed`);
+  }
+
+  private _drainRetrochecksQueue(): void {
+    const MAX_CONCURRENT = 2;
+    if (this.retrochecksQueue.length > 0 && this.retrochecksInFlight < MAX_CONCURRENT) {
+      const fn = this.retrochecksQueue.shift()!;
+      this.retrochecksInFlight++;
+      fn().finally(() => {
+        this.retrochecksInFlight--;
+        this._drainRetrochecksQueue();
+      });
+    }
   }
 
   private async _rpcRetrocheck(
@@ -418,7 +472,7 @@ export class PumpPortalAdapter implements IngestionSource {
     const rawSigs = (await rpcCall({
       jsonrpc: "2.0", id: 1,
       method:  "getSignaturesForAddress",
-      params:  [mint, { limit: 10 }],
+      params:  [mint, { limit: 5 }],
     })) as Array<{ signature: string; blockTime?: number }> | null;
 
     if (!rawSigs || rawSigs.length === 0) {
@@ -426,7 +480,13 @@ export class PumpPortalAdapter implements IngestionSource {
       return;
     }
 
-    console.log(`${tag} found ${rawSigs.length} sigs, checking first 3s`);
+    // If only 1 signature exists it's the create tx itself — no Jito bundle possible
+    if (rawSigs.length === 1) {
+      console.log(`${tag} only 1 sig (create tx only) — no Jito bundle`);
+      return;
+    }
+
+    console.log(`${tag} found ${rawSigs.length} sigs via ${rpcLabel}, checking early txs`);
 
     // Returned newest-first; reverse so we process oldest (creation block) first
     const sigs = [...rawSigs].reverse();
