@@ -1,19 +1,23 @@
 /**
- * BundleTracker — real-time monitor for the "Jito bundle-pump → migrate" pattern.
+ * BundleTracker — real-time monitor for the "bundle-pump → migrate" pattern.
  *
- * Detection gate:
- *   A non-dev wallet buys ≥7 SOL in the SAME BLOCK as the token's creation
- *   (confirmed by the RPC retrocheck in pumpPortalAdapter — isJitoBundle=true).
- *   MC must be below 18k at trigger time.
+ * Two detection paths (both accepted):
  *
- * This is the highest-quality signal: same-block Jito bundles average +77.5% PnL.
- * Time-window filtering is NOT done here — the retrocheck already guarantees the
- * trade is from the creation block (blockTime match), so there is no age gate.
+ *  1. RETROCHECK (isJitoBundle=true): same-block Jito bundle confirmed on-chain
+ *     by pumpPortalAdapter's RPC balance-diff check. Zero time-window needed —
+ *     the retrocheck already guarantees the trade is from the creation block.
+ *
+ *  2. WEBSOCKET fast-follow: subscribeTokenTrade delivers a ≥7 SOL buy within
+ *     TOKEN_AGE_LIMIT_MS of the token's first observed trade. Catches coordinated
+ *     multi-wallet buys at T+1–15s that Jito routes but are not strictly same-block.
+ *
+ * Both types average strong PnL. Same-block (+77.5%) is highest quality; fast-follow
+ * (1–15s) is slightly lower but still significantly profitable.
  *
  * Scoring 0–100:
- *   60  — base: first confirmed Jito buy
- *   +15 — per additional Jito buyer in same block (cap 90)
- *   +10 — bonus if ANY triggering wallet is a known gang wallet (higher certainty)
+ *   60  — base: first ≥7 SOL buy
+ *   +15 — per additional ≥7 SOL buyer (cap 90)
+ *   +10 — bonus if triggering wallet is a known gang wallet
  *   +10 — very early detection (MC < 5k)
  *   +5  — early detection (MC < 12k)
  */
@@ -32,8 +36,10 @@ const SUSPECT_TTL_MS  = 60 * 60_000;
 // Suspects past this MC are expired (already migrating / failed)
 const EXPIRE_MC       = 40_000;
 
-// Minimum SOL a single buy must be to count as a Jito bundle signal
+// Minimum SOL a single buy must be to count as a signal
 const MIN_TRIGGER_SOL = 7;
+// Fast-follow window for WebSocket-delivered trades (not same-block retrocheck)
+const TOKEN_AGE_LIMIT_MS = 15_000; // 15 seconds
 
 // ─── scoring ──────────────────────────────────────────────────────────────────
 const SCORE_BASE_TRIGGER   = 60;  // first ≥7 SOL buy (any wallet)
@@ -121,6 +127,8 @@ export class BundleTracker {
   /** Known gang wallets — used for scoring bonus only, NOT as an entry gate. */
   private readonly gangWallets: Set<string> = new Set();
   private readonly suspects = new Map<string, Suspect>();
+  /** First-observed timestamp per mint — used for fast-follow age gating. */
+  private readonly tokenBornAt = new Map<string, number>();
   private totalDetected = 0;
   private onNewSuspect?: (s: BundleSuspect) => void;
 
@@ -149,25 +157,39 @@ export class BundleTracker {
     }
   }
 
-  /** Called on every launch event — no-op now that we don't need age tracking. */
-  onLaunch(_event: CanonicalEvent): void { /* intentionally empty */ }
+  /** Record token birth time from the launch event for age-gating fast-follow buys. */
+  onLaunch(event: CanonicalEvent): void {
+    if (!event.mint) return;
+    const bornAt = event.timestamp ? new Date(event.timestamp).getTime() : Date.now();
+    if (!this.tokenBornAt.has(event.mint)) this.tokenBornAt.set(event.mint, bornAt);
+  }
 
   /** Called on every trade event from the runtime engine. */
   onTrade(event: CanonicalEvent): void {
     if (event.type !== "trade" || event.side !== "buy") return;
     if (!event.mint || !event.wallet) return;
 
-    // Only act on trades that were confirmed on-chain as same-block Jito buys.
-    // These are injected by pumpPortalAdapter's RPC retrocheck with isJitoBundle=true.
-    if (!event.isJitoBundle) return;
-
-    console.log(`[BundleTracker] 🔥 Jito trade received: ${event.mint.slice(0, 8)} ${(event.amountSol||0).toFixed(2)} SOL from ${event.wallet.slice(0, 8)} MC=$${event.marketCap||0}`);
-
     const mc  = event.marketCap || 0;
     const sol = event.amountSol || 0;
 
     // Skip dev self-buy
     if (event.devWallet && event.wallet === event.devWallet) return;
+
+    const isJitoBundle = !!event.isJitoBundle;
+
+    // Path 1: retrocheck-confirmed same-block Jito buy — always accepted
+    // Path 2: WebSocket fast-follow buy — must be within TOKEN_AGE_LIMIT_MS
+    if (!isJitoBundle) {
+      const tradeTime = event.timestamp ? new Date(event.timestamp).getTime() : Date.now();
+      if (!this.tokenBornAt.has(event.mint)) this.tokenBornAt.set(event.mint, tradeTime);
+      const bornAt = this.tokenBornAt.get(event.mint)!;
+      const ageMs  = tradeTime - bornAt;
+      if (ageMs > TOKEN_AGE_LIMIT_MS) return;
+    }
+
+    if (isJitoBundle) {
+      console.log(`[BundleTracker] 🔥 Jito (same-block): ${event.mint.slice(0, 8)} +${sol.toFixed(2)} SOL from ${event.wallet.slice(0, 8)} MC=$${mc}`);
+    }
 
     const isKnownGang = this.gangWallets.has(event.wallet);
     const isWhaleBuy  = sol >= MIN_TRIGGER_SOL && (mc < PRE_BUNDLE_MC || mc === 0);
@@ -252,6 +274,13 @@ export class BundleTracker {
     for (const [mint, s] of this.suspects) {
       if (now - s.detectedAt > SUSPECT_TTL_MS || s.currentMc > EXPIRE_MC) {
         this.suspects.delete(mint);
+        this.tokenBornAt.delete(mint);
+      }
+    }
+    // Also purge tokenBornAt for non-suspects older than 30s (memory hygiene)
+    for (const [mint, bornAt] of this.tokenBornAt) {
+      if (!this.suspects.has(mint) && now - bornAt > 30_000) {
+        this.tokenBornAt.delete(mint);
       }
     }
   }
