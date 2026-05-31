@@ -31,19 +31,22 @@ const SUSPECT_TTL_MS = 60 * 60_000;
 // Suspects whose MC exceeded this are expired (they already bundled or failed)
 const EXPIRE_MC = 60_000;
 
+// ─── entry quality gate (from bundleswipe.mjs validation) ────────────────────
+// The key differentiator between real gang ops and incidental wallet overlap:
+// real gang operations use ~7-9 SOL per sybil wallet buy.
+// Incidental buys are 0.1-2 SOL. This is the single most predictive signal.
+// A token is not added to suspects at all unless this gate passes.
+const MIN_TRIGGER_SOL = 7;
+
 // ─── scoring weights ──────────────────────────────────────────────────────────
-// Each distinct gang wallet buy: +30 points (cap at 90 for 3+ wallets)
-const SCORE_PER_WALLET = 30;
-const SCORE_WALLET_CAP = 90;
-// Buy/sell ratio bonus
-const SCORE_HIGH_BS = 10;  // ratio > 8
-const SCORE_MED_BS  = 5;   // ratio > 4
-// Largest single pre-bundle buy bonus
-const SCORE_BIG_BUY  = 10; // > 5 SOL
-const SCORE_MED_BUY  = 5;  // > 2 SOL
-// Early detection bonus
-const SCORE_VERY_EARLY = 10; // MC < 5k at first detection
-const SCORE_EARLY      = 5;  // MC < 12k
+// The primary signal: presence of a ≥7 SOL gang wallet buy.
+// Once seen, score starts at 60 and increases with confirmation.
+const SCORE_BASE_TRIGGER   = 60; // first qualifying gang wallet buy detected
+const SCORE_PER_EXTRA_WALL = 15; // each additional gang wallet buy ≥7 SOL
+const SCORE_WALL_CAP       = 90; // cap from wallet count
+// Secondary: how early was the detection?
+const SCORE_VERY_EARLY = 10; // MC < 5k
+const SCORE_EARLY      =  5; // MC < 12k
 
 export interface BundleSuspect {
   mint: string;
@@ -73,19 +76,19 @@ interface Suspect {
   detectedAt: number;        // epoch ms
   detectionMc: number;
   currentMc: number;
-  gangWallets: Set<string>;
+  gangWallets: Set<string>;  // all gang wallets seen (any size)
+  qualifyingWallets: Set<string>; // gang wallets with ≥7 SOL buy
   totalBuys: number;
   totalSells: number;
   largestBuySol: number;
 }
 
 function calcScore(s: Suspect): number {
-  let score = Math.min(SCORE_WALLET_CAP, s.gangWallets.size * SCORE_PER_WALLET);
-  const bs = s.totalSells > 0 ? s.totalBuys / s.totalSells : s.totalBuys;
-  if (bs > 8) score += SCORE_HIGH_BS;
-  else if (bs > 4) score += SCORE_MED_BS;
-  if (s.largestBuySol > 5) score += SCORE_BIG_BUY;
-  else if (s.largestBuySol > 2) score += SCORE_MED_BUY;
+  if (s.qualifyingWallets.size === 0) return 0; // gate: no qualifying buy yet
+  // Base from first qualifying buy + extra wallets
+  let score = SCORE_BASE_TRIGGER;
+  score += Math.min(SCORE_WALL_CAP - SCORE_BASE_TRIGGER, (s.qualifyingWallets.size - 1) * SCORE_PER_EXTRA_WALL);
+  // Early detection bonus
   if (s.detectionMc < 5_000) score += SCORE_VERY_EARLY;
   else if (s.detectionMc < 12_000) score += SCORE_EARLY;
   return Math.min(100, score);
@@ -99,8 +102,8 @@ function toPublic(s: Suspect): BundleSuspect {
     detectedAt: new Date(s.detectedAt).toISOString(),
     detectionMc: Math.round(s.detectionMc),
     currentMc: Math.round(s.currentMc),
-    gangWallets: [...s.gangWallets],
-    gangWalletCount: s.gangWallets.size,
+    gangWallets: [...s.qualifyingWallets], // show only the qualifying (≥7 SOL) ones
+    gangWalletCount: s.qualifyingWallets.size,
     totalBuys: s.totalBuys,
     totalSells: s.totalSells,
     buyToSellRatio: +bs.toFixed(2),
@@ -133,46 +136,45 @@ export class BundleTracker {
     if (event.type !== "trade" || event.side !== "buy") return;
     if (!event.mint || !event.wallet) return;
     const mc = event.marketCap || 0;
+    const sol = event.amountSol || 0;
+    const isGangWallet = this.gangWallets.has(event.wallet);
+    const isQualifyingBuy = isGangWallet && sol >= MIN_TRIGGER_SOL;
 
-    // Update currentMc on existing suspects regardless of wallet
+    // Update existing suspects on every trade (any buyer)
     const existing = this.suspects.get(event.mint);
     if (existing) {
       if (mc > 0) existing.currentMc = mc;
       existing.totalBuys++;
-      // Track large buys even from non-gang wallets (pattern signal)
-      if (mc < PRE_BUNDLE_MC && (event.amountSol || 0) > existing.largestBuySol) {
-        existing.largestBuySol = event.amountSol || 0;
+      if (sol > existing.largestBuySol) existing.largestBuySol = sol;
+      if (isGangWallet) existing.gangWallets.add(event.wallet);
+      if (isQualifyingBuy) {
+        const prevSize = existing.qualifyingWallets.size;
+        existing.qualifyingWallets.add(event.wallet);
+        if (existing.qualifyingWallets.size > prevSize) {
+          console.log(`[BundleTracker] ${event.mint.slice(0, 8)}… +qualifying wallet → ${existing.qualifyingWallets.size} (score=${calcScore(existing)})`);
+        }
       }
+      return;
     }
 
-    // Only create / enrich with gang wallet signal
-    if (!this.gangWallets.has(event.wallet)) return;
-    if (mc >= PRE_BUNDLE_MC) return; // already in bundle phase, too late to flag
+    // Only create a new suspect on a qualifying gang buy (≥7 SOL from gang wallet pre-25k)
+    if (!isQualifyingBuy) return;
+    if (mc >= PRE_BUNDLE_MC) return; // already in bundle phase
 
-    if (!existing) {
-      this.suspects.set(event.mint, {
-        mint: event.mint,
-        symbol: "?", // filled in by onToken
-        detectedAt: Date.now(),
-        detectionMc: mc,
-        currentMc: mc,
-        gangWallets: new Set([event.wallet]),
-        totalBuys: 1,
-        totalSells: 0,
-        largestBuySol: event.amountSol || 0,
-      });
-      this.totalDetected++;
-      console.log(`[BundleTracker] NEW suspect ${event.mint.slice(0, 8)}… MC=$${Math.round(mc)} wallet=${event.wallet.slice(0, 8)}…`);
-    } else {
-      existing.gangWallets.add(event.wallet);
-      if ((event.amountSol || 0) > existing.largestBuySol) {
-        existing.largestBuySol = event.amountSol || 0;
-      }
-      const prev = existing.gangWallets.size - 1;
-      if (existing.gangWallets.size > prev) {
-        console.log(`[BundleTracker] ${event.mint.slice(0, 8)}… now ${existing.gangWallets.size} gang wallets (score=${calcScore(existing)})`);
-      }
-    }
+    this.suspects.set(event.mint, {
+      mint: event.mint,
+      symbol: "?",
+      detectedAt: Date.now(),
+      detectionMc: mc,
+      currentMc: mc,
+      gangWallets: new Set([event.wallet]),
+      qualifyingWallets: new Set([event.wallet]),
+      totalBuys: 1,
+      totalSells: 0,
+      largestBuySol: sol,
+    });
+    this.totalDetected++;
+    console.log(`[BundleTracker] NEW suspect ${event.mint.slice(0, 8)}… MC=$${Math.round(mc)} sol=${sol.toFixed(2)} score=60`);
   }
 
   /** Called on sell events to track buy/sell ratio on suspects. */

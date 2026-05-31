@@ -35,6 +35,13 @@ const STOP_LOSS_FRAC = 0.70;     // -30% stop
 const SLIPPAGE_FRAC = 0.03;      // 3% round-trip slippage
 const DEAD_WINDOW_MS = 10 * 60_000; // 10 min no trades → dead
 
+// ── Entry quality filters (the key finding from bundlecompare.mjs) ──────────
+// Enter only when the triggering gang wallet buy is this large (real op size ~8 SOL)
+const MIN_TRIGGER_BUY_SOL = 7;
+// Require at least this many distinct gang wallet buys before entering
+// (1 = any, 2 = at least two separate gang wallets, etc.)
+const MIN_GANG_WALLETS_BEFORE_ENTRY = 1;
+
 const argv = process.argv.slice(2);
 const useDb = !argv.includes("--no-db");
 
@@ -130,15 +137,21 @@ for (const [mint, trades] of tradesByMint) {
   if (!trades.length) continue;
   const meta = gangTokenList.find((t) => t.mint === mint) || {};
 
-  // Step 1: find first gang wallet buy (this is our entry)
+  // Step 1: find the first gang wallet buy meeting the quality threshold
+  // Track distinct gang wallets seen as we scan
+  const seenGangWallets = new Set();
   let entryIdx = -1;
   for (let i = 0; i < trades.length; i++) {
-    if (trades[i].side === "buy" && gangWallets.has(trades[i].wallet) && trades[i].mc > 0) {
+    const t = trades[i];
+    if (t.side !== "buy" || !gangWallets.has(t.wallet) || t.mc <= 0) continue;
+    seenGangWallets.add(t.wallet);
+    // Check quality gates: buy size AND enough gang wallets seen so far
+    if (t.sol >= MIN_TRIGGER_BUY_SOL && seenGangWallets.size >= MIN_GANG_WALLETS_BEFORE_ENTRY) {
       entryIdx = i;
       break;
     }
   }
-  if (entryIdx < 0) continue; // no gang wallet buy found (no entry signal)
+  if (entryIdx < 0) continue; // no qualifying entry signal
 
   const entryTrade = trades[entryIdx];
   const entryMc = entryTrade.mc;
