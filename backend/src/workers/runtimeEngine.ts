@@ -393,31 +393,44 @@ export class RuntimeEngine {
     }
 
     // ── Step 2: live trades for tracked mints (bonding-curve feed) ───────────
-    // "Track until dead": we keep a (metered) trade subscription for a token only
-    // while it's still alive — i.e. it traded within ACTIVE_WINDOW_MS. A token
-    // that goes quiet for that long is considered dead and dropped, freeing the
-    // budget for live ones. New tokens get the full window from launch (their
-    // lastTradeAt starts at createdAt) to show their first trades.
     const now = Date.now();
     const lastTradeMs = (t: TokenState) => Date.parse(t.lastTradeAt) || Date.parse(t.createdAt) || now;
-    // Spend the metered budget by strategy relevance, not raw busy-ness:
-    //   prio 0 = coins we hold (must track for TP/SL exits)
-    //   prio 1 = young & still-cheap coins (the playbook's entry candidates)
-    //   prio 2 = everything else still trading (kept only if budget is left over)
-    const heldMints = new Set([...this.paper.openMints(), ...this.live.openMints()]);
-    const prio = (t: TokenState): number => {
-      if (heldMints.has(t.mint)) return 0;
-      const age = now - (Date.parse(t.createdAt) || now);
-      if (age <= ENTRY_ZONE_MAX_AGE_MS && t.marketCap > 0 && t.marketCap <= ENTRY_ZONE_MAX_MC) return 1;
-      return 2;
-    };
-    const tracked = new Set(heldMints); // never drop an open position
-    const alive = [...this.state.tokens.values()]
-      .filter((t) => now - lastTradeMs(t) < ACTIVE_WINDOW_MS)
-      .sort((a, b) => prio(a) - prio(b) || lastTradeMs(b) - lastTradeMs(a));
-    for (const t of alive) {
-      if (tracked.size >= MAX_TRADE_SUBSCRIPTIONS) break;
-      tracked.add(t.mint);
+
+    // BUNDLE_ONLY_SUBSCRIPTIONS mode: only pay for trades on open positions +
+    // tokens launched in the last BUNDLE_DETECT_WINDOW_MS. Bundle detection
+    // only needs the first 10s of a token's life — subscribing for 2 minutes
+    // wastes ~90% of the metered budget on tokens we never buy.
+    const heldMints = new Set([
+      ...this.paper.openMints(),
+      ...this.live.openMints(),
+      ...this.bundleLive.openMints(),
+    ]);
+    let tracked: Set<string>;
+    if (env.BUNDLE_ONLY_SUBSCRIPTIONS) {
+      // Only open positions + brand-new tokens (within bundle detection window)
+      tracked = new Set(heldMints);
+      for (const t of this.state.tokens.values()) {
+        if (tracked.size >= MAX_TRADE_SUBSCRIPTIONS) break;
+        const age = now - (Date.parse(t.createdAt) || now);
+        if (age <= env.BUNDLE_DETECT_WINDOW_MS) tracked.add(t.mint);
+      }
+    } else {
+      // Default: broad subscription — held positions first, then young/cheap
+      // entry candidates, then anything still trading within ACTIVE_WINDOW_MS.
+      const prio = (t: TokenState): number => {
+        if (heldMints.has(t.mint)) return 0;
+        const age = now - (Date.parse(t.createdAt) || now);
+        if (age <= ENTRY_ZONE_MAX_AGE_MS && t.marketCap > 0 && t.marketCap <= ENTRY_ZONE_MAX_MC) return 1;
+        return 2;
+      };
+      tracked = new Set(heldMints);
+      const alive = [...this.state.tokens.values()]
+        .filter((t) => now - lastTradeMs(t) < ACTIVE_WINDOW_MS)
+        .sort((a, b) => prio(a) - prio(b) || lastTradeMs(b) - lastTradeMs(a));
+      for (const t of alive) {
+        if (tracked.size >= MAX_TRADE_SUBSCRIPTIONS) break;
+        tracked.add(t.mint);
+      }
     }
     const trackedMints = [...tracked];
     if (trackedMints.length > 0) {

@@ -34,6 +34,16 @@ const envSchema = z.object({
   // strategy relevance (held positions + young/cheap entry candidates first).
   MAX_TRADE_SUBSCRIPTIONS: z.coerce.number().default(200),
   TRADE_ACTIVE_WINDOW_MS: z.coerce.number().default(120000),
+  // When true: subscribe ONLY to tokens launched in the last BUNDLE_DETECT_WINDOW_MS
+  // + open positions. Cuts metered API spend by ~90% when running bundle-sniper only.
+  // The bundle gate only needs the first 10s of trades to decide; everything else
+  // is wasted messages we're paying for.
+  BUNDLE_ONLY_SUBSCRIPTIONS: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
+  // How long after launch to keep subscribing (for bundle detection window + buffer).
+  BUNDLE_DETECT_WINDOW_MS: z.coerce.number().default(20_000),
   // Drop Pump.fun "Mayhem Mode" launches (Token-2022 mints with an AI trading
   // agent). Detected on-chain via the mint's owner program.
   FILTER_MAYHEM: z
