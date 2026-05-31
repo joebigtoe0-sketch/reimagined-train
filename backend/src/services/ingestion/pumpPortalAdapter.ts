@@ -378,14 +378,17 @@ export class PumpPortalAdapter implements IngestionSource {
     if (env.ALCHEMY_API) rpcCandidates.push(env.ALCHEMY_API);
     rpcCandidates.push("https://api.mainnet-beta.solana.com");
 
+    console.log(`[Retrocheck ${mint.slice(0, 8)}] RPC candidates: ${rpcCandidates.map(u => u.includes("alchemy") ? "Alchemy" : u.includes("helius") ? "Helius" : "PublicRPC").join(" → ")}`);
+
     for (const rpcUrl of rpcCandidates) {
       try {
         await this._rpcRetrocheck(rpcUrl, mint, devWallet, createdAtMs);
         return;
-      } catch {
-        // try next endpoint
+      } catch (err) {
+        console.warn(`[Retrocheck ${mint.slice(0, 8)}] ${rpcUrl.includes("alchemy") ? "Alchemy" : rpcUrl.includes("helius") ? "Helius" : "PublicRPC"} failed: ${(err as Error).message} — trying next`);
       }
     }
+    console.warn(`[Retrocheck ${mint.slice(0, 8)}] all RPC endpoints failed`);
   }
 
   private async _rpcRetrocheck(
@@ -394,6 +397,11 @@ export class PumpPortalAdapter implements IngestionSource {
     devWallet: string,
     createdAtMs: number
   ): Promise<void> {
+    const tag = `[Retrocheck ${mint.slice(0, 8)}]`;
+    const rpcLabel = rpcUrl.includes("alchemy") ? "Alchemy"
+                   : rpcUrl.includes("helius")  ? "Helius"
+                   : "PublicRPC";
+
     const rpcCall = async (body: object) => {
       const r = await fetch(rpcUrl, {
         method:  "POST",
@@ -401,9 +409,11 @@ export class PumpPortalAdapter implements IngestionSource {
         body:    JSON.stringify(body),
       });
       const d = await r.json() as { result?: unknown; error?: { message: string } };
-      if (d.error) throw new Error(d.error.message);
+      if (d.error) throw new Error(`${rpcLabel} error: ${d.error.message}`);
       return d.result;
     };
+
+    console.log(`${tag} firing via ${rpcLabel}`);
 
     const rawSigs = (await rpcCall({
       jsonrpc: "2.0", id: 1,
@@ -411,15 +421,30 @@ export class PumpPortalAdapter implements IngestionSource {
       params:  [mint, { limit: 10 }],
     })) as Array<{ signature: string; blockTime?: number }> | null;
 
-    if (!rawSigs || rawSigs.length === 0) return;
+    if (!rawSigs || rawSigs.length === 0) {
+      console.log(`${tag} no signatures found yet — token may not be indexed`);
+      return;
+    }
+
+    console.log(`${tag} found ${rawSigs.length} sigs, checking first 3s`);
 
     // Returned newest-first; reverse so we process oldest (creation block) first
     const sigs = [...rawSigs].reverse();
 
     for (const sigInfo of sigs) {
-      if (sigInfo.blockTime && sigInfo.blockTime * 1000 > createdAtMs + 3_000) continue;
+      const sigAge = sigInfo.blockTime
+        ? sigInfo.blockTime * 1000 - createdAtMs
+        : 0;
 
-      // Small pause to respect RPC rate limits between getTransaction calls
+      // Skip transactions clearly after the creation window
+      if (sigInfo.blockTime && sigInfo.blockTime * 1000 > createdAtMs + 5_000) {
+        console.log(`${tag} skip sig ${sigInfo.signature.slice(0, 12)} — too late (${Math.round(sigAge / 1000)}s after create)`);
+        continue;
+      }
+
+      console.log(`${tag} fetching tx ${sigInfo.signature.slice(0, 12)} (blockTime offset ~${Math.round(sigAge)}ms)`);
+
+      // Small pause to respect RPC rate limits
       await new Promise<void>((resolve) => setTimeout(resolve, 250));
 
       const tx = (await rpcCall({
@@ -430,30 +455,57 @@ export class PumpPortalAdapter implements IngestionSource {
           { encoding: "json", maxSupportedTransactionVersion: 0, commitment: "confirmed" },
         ],
       })) as {
-        transaction?: { message?: { accountKeys?: string[] } };
+        transaction?: {
+          message?: {
+            // Legacy transactions
+            accountKeys?: string[];
+            // V0 (versioned) transactions — Jito bundles use these
+            staticAccountKeys?: string[];
+          };
+        };
         meta?: { preBalances?: number[]; postBalances?: number[] };
       } | null;
 
-      if (!tx) continue;
+      if (!tx) {
+        console.log(`${tag} tx not found (not yet confirmed?)`);
+        continue;
+      }
 
-      const keys  = tx.transaction?.message?.accountKeys ?? [];
-      const pre   = tx.meta?.preBalances  ?? [];
-      const post  = tx.meta?.postBalances ?? [];
+      // V0 transactions use staticAccountKeys; legacy use accountKeys — check both
+      const msg  = tx.transaction?.message;
+      const keys = msg?.staticAccountKeys ?? msg?.accountKeys ?? [];
+      const pre  = tx.meta?.preBalances  ?? [];
+      const post = tx.meta?.postBalances ?? [];
 
-      for (let i = 0; i < keys.length; i++) {
-        const account       = keys[i] ?? "";
-        const deltaLamports = (post[i] ?? 0) - (pre[i] ?? 0);
+      console.log(`${tag} tx has ${keys.length} keys, ${pre.length} balance entries`);
 
-        // A large negative delta = wallet spent ≥ 7 SOL (buy + fee + Jito tip)
+      // Log the largest balance changes for visibility
+      const changes = keys.map((k, i) => ({
+        account:    typeof k === "string" ? k : (k as Record<string,string>).pubkey ?? String(k),
+        delta:      (post[i] ?? 0) - (pre[i] ?? 0),
+      }));
+
+      const biggest = [...changes].sort((a, b) => a.delta - b.delta).slice(0, 3);
+      biggest.forEach((c) => {
+        const solDelta = (c.delta / 1e9).toFixed(4);
+        const isDevTag = c.account === devWallet ? " [DEV]" : "";
+        console.log(`${tag}   ${c.account.slice(0, 8)} Δ=${solDelta} SOL${isDevTag}`);
+      });
+
+      for (const { account, delta: deltaLamports } of changes) {
+        // A large negative delta = wallet spent ≥ 7 SOL
         if (deltaLamports >= -7_000_000_000) continue;
         if (!account || account === devWallet) continue;
 
-        // Subtract typical overhead (~0.01 SOL for fee + tip) to get buy amount
+        // Subtract typical overhead (~0.01 SOL for fee + tip)
         const sol = Math.abs(deltaLamports) / 1e9 - 0.01;
         if (sol < 7) continue;
 
         const dedupKey = `${sigInfo.signature}:${mint}:buy`;
-        if (this.seenTradeSigs.has(dedupKey)) continue;
+        if (this.seenTradeSigs.has(dedupKey)) {
+          console.log(`${tag} already seen this sig — skip`);
+          continue;
+        }
         this.seenTradeSigs.add(dedupKey);
 
         const blockTs = sigInfo.blockTime
@@ -474,13 +526,13 @@ export class PumpPortalAdapter implements IngestionSource {
         });
 
         console.log(
-          `[PumpPortal] ⚡ RPC retrocheck: ${mint.slice(0, 8)} ` +
-          `+${sol.toFixed(2)} SOL from ${account.slice(0, 8)} ` +
-          `(same-block Jito — was missed by WS subscription)`
+          `${tag} ⚡ JITO BUY DETECTED! +${sol.toFixed(2)} SOL from ${account.slice(0, 8)} — injecting into trade buffer`
         );
         break; // one detection per transaction is enough to trigger the signal
       }
     }
+
+    console.log(`${tag} retrocheck complete`);
   }
 
   private capSet(set: Set<string>, max: number, keep: number): void {

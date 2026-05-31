@@ -161,6 +161,8 @@ export class BundleTracker {
     // These are injected by pumpPortalAdapter's RPC retrocheck with isJitoBundle=true.
     if (!event.isJitoBundle) return;
 
+    console.log(`[BundleTracker] 🔥 Jito trade received: ${event.mint.slice(0, 8)} ${(event.amountSol||0).toFixed(2)} SOL from ${event.wallet.slice(0, 8)} MC=$${event.marketCap||0}`);
+
     const mc  = event.marketCap || 0;
     const sol = event.amountSol || 0;
 
