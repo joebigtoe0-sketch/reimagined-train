@@ -514,15 +514,17 @@ export class PumpPortalAdapter implements IngestionSource {
 
     console.log(`${tag} firing via ${rpcLabel} (bonding curve: ${bondingCurve.slice(0, 8)})`);
 
+    // Use a large limit so the oldest entries (Jito bundle creation block) are always
+    // included — a popular token can get 50+ buys in the first second, which would
+    // push the Jito bundle off the bottom of a small limit window.
     const rawSigs = (await rpcCall({
       jsonrpc: "2.0", id: 1,
       method:  "getSignaturesForAddress",
-      params:  [bondingCurve, { limit: 10 }],
+      params:  [bondingCurve, { limit: 1000 }],
     })) as Array<{ signature: string; blockTime?: number }> | null;
 
     if (!rawSigs || rawSigs.length === 0) {
       if (isRetry) console.log(`${tag} still no sigs at retry — no Jito bundle`);
-      // else: silent — retry at T+2000ms will check again
       return;
     }
 
@@ -584,19 +586,27 @@ export class PumpPortalAdapter implements IngestionSource {
       const pre  = tx.meta?.preBalances  ?? [];
       const post = tx.meta?.postBalances ?? [];
 
-      console.log(`${tag} tx has ${keys.length} keys, ${pre.length} balance entries`);
+      // CRITICAL: pre/post balance arrays cover ALL accounts including ALT-loaded ones
+      // (indices >= keys.length). We must iterate over ALL balance entries, not just
+      // staticAccountKeys, otherwise V0 Jito bundle buyers loaded via ALTs are invisible.
+      const totalAccounts = pre.length;
+      console.log(`${tag} tx has ${keys.length} static keys, ${totalAccounts} balance entries (${totalAccounts - keys.length} ALT-loaded)`);
 
-      // Log the largest balance changes for visibility
-      const changes = keys.map((k, i) => ({
-        account:    typeof k === "string" ? k : (k as Record<string,string>).pubkey ?? String(k),
-        delta:      (post[i] ?? 0) - (pre[i] ?? 0),
-      }));
+      // Build changes for every account index — use address if known, otherwise placeholder
+      const changes = Array.from({ length: totalAccounts }, (_, i) => {
+        const keyEntry = keys[i];
+        const account  = keyEntry
+          ? (typeof keyEntry === "string" ? keyEntry : (keyEntry as Record<string,string>).pubkey ?? `idx-${i}`)
+          : `alt-loaded-${i}`;
+        return { account, delta: (post[i] ?? 0) - (pre[i] ?? 0) };
+      });
 
       const biggest = [...changes].sort((a, b) => a.delta - b.delta).slice(0, 3);
       biggest.forEach((c) => {
         const solDelta = (c.delta / 1e9).toFixed(4);
         const isDevTag = c.account === devWallet ? " [DEV]" : "";
-        console.log(`${tag}   ${c.account.slice(0, 8)} Δ=${solDelta} SOL${isDevTag}`);
+        const isAlt    = c.account.startsWith("alt-loaded-") ? " [ALT]" : "";
+        console.log(`${tag}   ${c.account.slice(0, 12)} Δ=${solDelta} SOL${isDevTag}${isAlt}`);
       });
 
       for (const { account, delta: deltaLamports } of changes) {
