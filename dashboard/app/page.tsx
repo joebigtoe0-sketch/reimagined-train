@@ -1464,7 +1464,7 @@ function BundleSniperPanel({ bundle, bundleLive, onBundleLiveControl }: {
       <div className="panel-hdr" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <span className="title">🎯 BUNDLE SNIPER</span>
         <span className="dim" style={{ fontSize: 10 }}>
-          {gangCount.toLocaleString()} wallets · {totalDetected} detected
+          ≥7◎ gate · {totalDetected} detected · {gangCount.toLocaleString()} known gang
         </span>
       </div>
 
@@ -1580,7 +1580,7 @@ function BundleSniperPanel({ bundle, bundleLive, onBundleLiveControl }: {
       <div className="panel-body">
         {suspects.length === 0 ? (
           <div style={{ padding: "12px 10px", fontSize: 11, color: "var(--text-3)" }}>
-            Watching {gangCount.toLocaleString()} gang wallets for new accumulation…
+            Watching for any ≥7◎ buy before $18k MC on any token…
           </div>
         ) : (
           suspects.map((s) => (

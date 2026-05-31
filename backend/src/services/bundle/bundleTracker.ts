@@ -119,7 +119,7 @@ function toPublic(s: Suspect): BundleSuspect {
 
 export class BundleTracker {
   /** Known gang wallets — used for scoring bonus only, NOT as an entry gate. */
-  private readonly gangWallets: Set<string>;
+  private readonly gangWallets: Set<string> = new Set();
   private readonly suspects = new Map<string, Suspect>();
   private totalDetected = 0;
   private onNewSuspect?: (s: BundleSuspect) => void;
@@ -127,13 +127,24 @@ export class BundleTracker {
   setOnNewSuspect(cb: (s: BundleSuspect) => void): void { this.onNewSuspect = cb; }
 
   constructor() {
-    const jsonPath = path.join(__dirname, "gangWallets.json");
-    try {
-      const raw = fs.readFileSync(jsonPath, "utf8");
-      this.gangWallets = new Set(JSON.parse(raw) as string[]);
-      console.log(`[BundleTracker] loaded ${this.gangWallets.size} known gang wallets (scoring bonus only)`);
-    } catch {
-      console.warn("[BundleTracker] gangWallets.json not found");
+    // __dirname at runtime = dist/services/bundle/ → go up 3 levels to project root
+    const candidates = [
+      path.resolve(__dirname, "../../../scripts/lib/gangWallets.json"),
+      path.resolve(__dirname, "../../../../scripts/lib/gangWallets.json"),
+      path.join(__dirname, "gangWallets.json"), // legacy / local dev fallback
+    ];
+    let loaded = false;
+    for (const jsonPath of candidates) {
+      try {
+        const raw = fs.readFileSync(jsonPath, "utf8");
+        this.gangWallets = new Set(JSON.parse(raw) as string[]);
+        console.log(`[BundleTracker] loaded ${this.gangWallets.size} gang wallets for scoring bonus (${jsonPath})`);
+        loaded = true;
+        break;
+      } catch { /* try next */ }
+    }
+    if (!loaded) {
+      console.warn("[BundleTracker] gangWallets.json not found — gang bonus disabled, behavioral gate still active");
       this.gangWallets = new Set(SEED_WALLETS);
     }
   }
