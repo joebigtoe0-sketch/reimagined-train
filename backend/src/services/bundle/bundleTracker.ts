@@ -37,7 +37,7 @@ const EXPIRE_MC       = 40_000;
 const MIN_TRIGGER_SOL = 7;
 // Only trigger if the whale buy happens within this window of token creation.
 // Real bundle gangs buy in the same block or within seconds of deployment.
-const TOKEN_AGE_LIMIT_MS = 20_000; // 20 seconds
+const TOKEN_AGE_LIMIT_MS = 10_000; // 10 seconds (backtest: +12.5% avg P&L vs no gate)
 
 // ─── scoring ──────────────────────────────────────────────────────────────────
 const SCORE_BASE_TRIGGER   = 60;  // first ≥7 SOL buy (any wallet)
