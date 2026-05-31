@@ -241,15 +241,19 @@ export class PumpPortalAdapter implements IngestionSource {
       // Jito bundle safety net: same-block buys (create + gang buy in one bundle)
       // are NEVER delivered via subscribeTokenTrade because our subscription
       // doesn't exist yet when PumpPortal broadcasts that block. Patch the gap
-      // by querying the Solana RPC 800 ms later, using balance-diff parsing
-      // to detect any large early buy we missed. No enhanced-API credits needed.
+      // by querying the Solana RPC using balance-diff parsing.
+      // We try at T+800ms then again at T+2000ms in case the indexer was slow.
       {
         const mintSnap      = msg.mint;
         const devWalletSnap = msg.traderPublicKey ?? "";
         const createdAtMs   = Date.now();
         setTimeout(
-          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createdAtMs),
+          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createdAtMs, false),
           800
+        );
+        setTimeout(
+          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createdAtMs, true),
+          2000
         );
       }
 
@@ -374,7 +378,8 @@ export class PumpPortalAdapter implements IngestionSource {
   private async heliusCatchEarlyBuy(
     mint: string,
     devWallet: string,
-    createdAtMs: number
+    createdAtMs: number,
+    isRetry = false,
   ): Promise<void> {
     const label = (u: string) =>
       u.includes("alchemy") ? "Alchemy" : u.includes("helius") ? "Helius" : "PublicRPC";
@@ -402,7 +407,7 @@ export class PumpPortalAdapter implements IngestionSource {
     await this._enqueueRetrocheck(async () => {
       for (const rpcUrl of rpcCandidates) {
         try {
-          await this._rpcRetrocheck(rpcUrl, mint, devWallet, createdAtMs);
+          await this._rpcRetrocheck(rpcUrl, mint, devWallet, createdAtMs, isRetry);
           return;
         } catch (err) {
           const msg = (err as Error).message ?? "";
@@ -449,7 +454,8 @@ export class PumpPortalAdapter implements IngestionSource {
     rpcUrl: string,
     mint: string,
     devWallet: string,
-    createdAtMs: number
+    createdAtMs: number,
+    isRetry = false,
   ): Promise<void> {
     const tag = `[Retrocheck ${mint.slice(0, 8)}]`;
     const rpcLabel = rpcUrl.includes("alchemy") ? "Alchemy"
@@ -476,13 +482,14 @@ export class PumpPortalAdapter implements IngestionSource {
     })) as Array<{ signature: string; blockTime?: number }> | null;
 
     if (!rawSigs || rawSigs.length === 0) {
-      console.log(`${tag} no signatures found yet — token may not be indexed`);
+      if (isRetry) console.log(`${tag} still no sigs at retry — no Jito bundle`);
+      // else: silent — retry at T+2000ms will check again
       return;
     }
 
     // If only 1 signature exists it's the create tx itself — no Jito bundle possible
     if (rawSigs.length === 1) {
-      console.log(`${tag} only 1 sig (create tx only) — no Jito bundle`);
+      if (isRetry) console.log(`${tag} only 1 sig (create tx only) — no Jito bundle`);
       return;
     }
 
