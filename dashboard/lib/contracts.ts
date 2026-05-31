@@ -138,6 +138,27 @@ export type LiveState = {
   trades: LiveTrade[];
 };
 
+export type BundleSuspect = {
+  mint: string;
+  symbol: string;
+  detectedAt: string;
+  detectionMc: number;
+  currentMc: number;
+  gangWallets: string[];
+  gangWalletCount: number;
+  totalBuys: number;
+  totalSells: number;
+  buyToSellRatio: number;
+  largestBuySol: number;
+  score: number;
+};
+
+export type BundleState = {
+  suspects: BundleSuspect[];
+  gangWalletCount: number;
+  totalDetected: number;
+};
+
 export type DeveloperStat = {
   devWallet: string;
   tokens: number;

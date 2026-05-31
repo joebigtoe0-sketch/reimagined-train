@@ -27,6 +27,8 @@ import { detectMarketSignals } from "../services/signals/marketSignals.js";
 import { PaperTrader } from "../services/paper/paperTrader.js";
 import { LiveTrader } from "../services/live/liveTrader.js";
 import { PlaybookStrategy } from "../services/intelligence/playbookStrategy.js";
+import { BundleTracker } from "../services/bundle/bundleTracker.js";
+import type { BundleState } from "../services/bundle/bundleTracker.js";
 import { RuntimeState } from "../state/runtimeState.js";
 import type { CanonicalEvent, ProbabilityRecord, TokenState } from "../types.js";
 
@@ -90,6 +92,7 @@ export class RuntimeEngine {
   private readonly paper = new PaperTrader();
   private readonly live = new LiveTrader();
   private readonly playbook = new PlaybookStrategy();
+  private readonly bundle = new BundleTracker();
   private calibration: CalibrationReport = { sampleSize: 0, brierScore: 0, precision: 0, recall: 0, driftDelta: 0 };
 
   private lastPaperSaveAt = 0;
@@ -159,9 +162,11 @@ export class RuntimeEngine {
       for (const token of this.state.tokens.values()) {
         this.paper.onToken(token);
         this.live.onToken(token);
+        this.bundle.onToken(token);
       }
       onBroadcast("paperUpdate", this.paper.state());
       onBroadcast("liveUpdate", this.live.state());
+      onBroadcast("bundleUpdate", this.bundle.state());
       // Periodically checkpoint open positions marked-to-market so a restart
       // resumes with fresh values (closes/entries already persist immediately).
       const now = Date.now();
@@ -178,6 +183,7 @@ export class RuntimeEngine {
   resetLive(): void { this.live.reset(); }
   liveState() { return this.live.state(); }
   paperState() { return this.paper.state(); }
+  bundleState(): BundleState { return this.bundle.state(); }
 
   private async refreshAlphaWallets(): Promise<void> {
     try {
@@ -465,6 +471,8 @@ export class RuntimeEngine {
           this.playbook.observe(token, event);
           this.paper.onTrade(token, event);
           this.live.onTrade(token, event);
+          if (event.side === "buy") this.bundle.onTrade(event);
+          else if (event.side === "sell") this.bundle.onSell(event);
         }
         // Force-persist the graduation label immediately — it's a rare, terminal
         // positive outcome we must never drop to the aux-write throttle.

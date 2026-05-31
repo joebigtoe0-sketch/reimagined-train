@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, CSSProperties } from "react";
-import type { AlertEvent, AlertRule, DeveloperStat, LiveState, PaperLifetime, PaperState, PaperTrade, TokenState, WalletProfile } from "../lib/contracts";
+import type { AlertEvent, AlertRule, BundleState, BundleSuspect, DeveloperStat, LiveState, PaperLifetime, PaperState, PaperTrade, TokenState, WalletProfile } from "../lib/contracts";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8080";
 const WS_BASE = API_BASE.startsWith("https://")
@@ -249,10 +249,11 @@ function actionStyle(a?: string): React.CSSProperties {
   }
 }
 
-function TerminalView({ tokens, search, onSelectToken, paper, onPaperControl, live, onLiveControl }: {
+function TerminalView({ tokens, search, onSelectToken, paper, onPaperControl, live, onLiveControl, bundle }: {
   tokens: TokenState[]; search: string; onSelectToken: (t: TokenState) => void;
   paper: PaperState | null; onPaperControl: (action: "start" | "stop" | "reset") => void;
   live: LiveState | null; onLiveControl: (action: "arm" | "disarm" | "reset") => void;
+  bundle: BundleState | null;
 }): ReactElement {
   const [sortKey, setSortKey] = useState<SortKey>("createdAt");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
@@ -453,6 +454,7 @@ function TerminalView({ tokens, search, onSelectToken, paper, onPaperControl, li
         </div>
         <PaperBotPanel paper={paper} onControl={onPaperControl} onSelectToken={onSelectToken} tokens={tokens} />
         <LiveBotPanel live={live} onControl={onLiveControl} onSelectToken={onSelectToken} tokens={tokens} />
+        <BundleSniperPanel bundle={bundle} />
       </div>
     </div>
   );
@@ -1436,6 +1438,132 @@ function DevsView({ developers, search, onSelectToken, tokens }: {
   );
 }
 
+// ─── BUNDLE SNIPER PANEL ─────────────────────────────────────────────────────
+function BundleSniperPanel({ bundle }: { bundle: BundleState | null }): ReactElement {
+  const suspects = bundle?.suspects ?? [];
+  const gangCount = bundle?.gangWalletCount ?? 0;
+  const totalDetected = bundle?.totalDetected ?? 0;
+
+  const scoreColor = (s: number) =>
+    s >= 80 ? "var(--up)" : s >= 50 ? "#f59e0b" : "var(--text-2)";
+
+  const pumpUrl = (mint: string) => `https://pump.fun/coin/${mint}`;
+
+  return (
+    <div className="panel" style={{ flex: "0 0 auto" }}>
+      <div className="panel-hdr" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span className="title">🎯 BUNDLE SNIPER</span>
+        <span className="dim" style={{ fontSize: 10 }}>
+          {gangCount.toLocaleString()} wallets · {totalDetected} detected
+        </span>
+      </div>
+      <div className="panel-body">
+        {suspects.length === 0 ? (
+          <div style={{ padding: "12px 10px", fontSize: 11, color: "var(--text-3)" }}>
+            Watching {gangCount.toLocaleString()} gang wallets for new accumulation…
+          </div>
+        ) : (
+          suspects.map((s) => (
+            <div key={s.mint} style={{ padding: "8px 10px", borderBottom: "1px solid var(--border)" }}>
+              {/* Header row */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <a
+                    href={pumpUrl(s.mint)}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{ color: "var(--fg)", fontWeight: 600, fontSize: 13, textDecoration: "none" }}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    ${s.symbol}
+                  </a>
+                  <span className="dim" style={{ fontSize: 10 }}>{fmtAge(s.detectedAt)} ago</span>
+                </div>
+                {/* Score badge */}
+                <div style={{
+                  background: scoreColor(s.score),
+                  color: "#000",
+                  fontWeight: 700,
+                  fontSize: 11,
+                  padding: "2px 7px",
+                  borderRadius: 4,
+                  minWidth: 36,
+                  textAlign: "center",
+                }}>
+                  {s.score}%
+                </div>
+              </div>
+
+              {/* Score bar */}
+              <div style={{ height: 3, background: "var(--border)", borderRadius: 2, marginBottom: 6, overflow: "hidden" }}>
+                <div style={{
+                  height: "100%",
+                  width: `${s.score}%`,
+                  background: scoreColor(s.score),
+                  borderRadius: 2,
+                  transition: "width 0.4s ease",
+                }} />
+              </div>
+
+              {/* Stats grid */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "2px 0", fontSize: 10 }}>
+                <div>
+                  <span className="dim">MC now </span>
+                  <span style={{ color: "var(--fg)" }}>${fmtMC(s.currentMc)}</span>
+                </div>
+                <div>
+                  <span className="dim">detected </span>
+                  <span style={{ color: "var(--fg)" }}>${fmtMC(s.detectionMc)}</span>
+                </div>
+                <div>
+                  <span className="dim">gang wallets </span>
+                  <span style={{ color: s.gangWalletCount >= 2 ? "var(--up)" : "var(--fg)" }}>
+                    {s.gangWalletCount}
+                  </span>
+                </div>
+                <div>
+                  <span className="dim">buy/sell </span>
+                  <span style={{ color: s.buyToSellRatio > 8 ? "var(--up)" : "var(--fg)" }}>
+                    {s.buyToSellRatio > 99 ? ">99" : s.buyToSellRatio.toFixed(1)}
+                  </span>
+                </div>
+                <div>
+                  <span className="dim">largest buy </span>
+                  <span style={{ color: s.largestBuySol > 5 ? "var(--up)" : "var(--fg)" }}>
+                    {s.largestBuySol.toFixed(2)}◎
+                  </span>
+                </div>
+                <div>
+                  <span className="dim">buys </span>
+                  <span style={{ color: "var(--fg)" }}>{s.totalBuys}</span>
+                </div>
+              </div>
+
+              {/* Gang wallets pills (first 3) */}
+              {s.gangWallets.length > 0 && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 3, marginTop: 5 }}>
+                  {s.gangWallets.slice(0, 3).map((w) => (
+                    <span key={w} style={{
+                      fontSize: 9, fontFamily: "monospace",
+                      background: "rgba(16,185,129,0.12)", color: "var(--up)",
+                      padding: "1px 4px", borderRadius: 3, border: "1px solid rgba(16,185,129,0.3)"
+                    }}>
+                      {w.slice(0, 6)}…{w.slice(-4)}
+                    </span>
+                  ))}
+                  {s.gangWallets.length > 3 && (
+                    <span style={{ fontSize: 9, color: "var(--text-3)" }}>+{s.gangWallets.length - 3} more</span>
+                  )}
+                </div>
+              )}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // MAIN APP
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1451,6 +1579,7 @@ export default function Home(): ReactElement {
   const [wsConnected, setWsConnected] = useState(false);
   const [paper, setPaper] = useState<PaperState | null>(null);
   const [live, setLive] = useState<LiveState | null>(null);
+  const [bundle, setBundle] = useState<BundleState | null>(null);
   const [selectedToken, setSelectedToken] = useState<TokenState | null>(null);
   const [selectedWallet, setSelectedWallet] = useState<WalletProfile | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -1459,7 +1588,7 @@ export default function Home(): ReactElement {
   useEffect(() => {
     const load = async (): Promise<void> => {
       try {
-        const [tR, aR, ruR, cR, wR, dR, pR, lR] = await Promise.all([
+        const [tR, aR, ruR, cR, wR, dR, pR, lR, bR] = await Promise.all([
           fetch(`${API_BASE}/api/tokens`),
           fetch(`${API_BASE}/api/alerts`),
           fetch(`${API_BASE}/api/alerts/rules`),
@@ -1468,6 +1597,7 @@ export default function Home(): ReactElement {
           fetch(`${API_BASE}/api/developers`),
           fetch(`${API_BASE}/api/paper`),
           fetch(`${API_BASE}/api/live`),
+          fetch(`${API_BASE}/api/bundle`),
         ]);
         const tj = await tR.json() as { tokens?: TokenState[] };
         const aj = await aR.json() as { alerts?: AlertEvent[] };
@@ -1477,6 +1607,7 @@ export default function Home(): ReactElement {
         const dj = await dR.json() as { developers?: DeveloperStat[] };
         const pj = await pR.json() as { paper?: PaperState };
         const lj = await lR.json() as { live?: LiveState };
+        const bj = await bR.json() as { bundle?: BundleState };
         if (tj.tokens) setTokens(tj.tokens);
         if (aj.alerts) setAlerts(aj.alerts);
         setRules(ruj.rules ?? []);
@@ -1485,6 +1616,7 @@ export default function Home(): ReactElement {
         if (dj.developers) setDevelopers(dj.developers);
         if (pj.paper) setPaper(pj.paper);
         if (lj.live) setLive(lj.live);
+        if (bj.bundle) setBundle(bj.bundle);
       } catch { /* backend may be starting */ }
     };
     void load();
@@ -1514,6 +1646,10 @@ export default function Home(): ReactElement {
           }
           if (msg.type === "liveUpdate") {
             if (msg.payload) setLive(msg.payload as unknown as LiveState);
+            return;
+          }
+          if (msg.type === "bundleUpdate") {
+            if (msg.payload) setBundle(msg.payload as unknown as BundleState);
             return;
           }
           if (msg.type === "tokenUpdate" || msg.type === "tokenLaunch") {
@@ -1568,7 +1704,7 @@ export default function Home(): ReactElement {
 
       <div style={{ minHeight: 0, overflow: "hidden", position: "relative" }}>
         {tab === "terminal" && (
-          <TerminalView tokens={tokens} search={search} onSelectToken={handleSelectToken} paper={paper} onPaperControl={paperControl} live={live} onLiveControl={liveControl} />
+          <TerminalView tokens={tokens} search={search} onSelectToken={handleSelectToken} paper={paper} onPaperControl={paperControl} live={live} onLiveControl={liveControl} bundle={bundle} />
         )}
         {tab === "token" && (
           <TokenView token={selectedToken} onSelectToken={handleSelectToken} paper={paper} />
