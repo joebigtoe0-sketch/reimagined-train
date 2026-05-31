@@ -99,6 +99,9 @@ export class BundleLiveTrader {
   private readonly traded = new Set<string>();
   private readonly trades: BundleLiveTrade[] = [];
   private readonly executor: PumpPortalExecutor | null;
+  private onTradeLog?: (t: BundleLiveTrade) => void;
+
+  setOnTradeLog(cb: (t: BundleLiveTrade) => void): void { this.onTradeLog = cb; }
 
   constructor() {
     if (env.LIVE_WALLET_PRIVATE_KEY) {
@@ -226,6 +229,7 @@ export class BundleLiveTrader {
       this.trades.unshift(trade);
       if (this.trades.length > 60) this.trades.length = 60;
       this.positions.delete(pos.mint);
+      if (this.onTradeLog) this.onTradeLog(trade);
       console.log(`[BundleLive] SELL $${pos.symbol} (${reason})  pnl:${pnl > 0 ? "+" : ""}${pnl.toFixed(3)}◎  tx:${result.signature.slice(0, 12)}…`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

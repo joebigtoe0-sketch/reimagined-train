@@ -352,6 +352,33 @@ export class RuntimeRepo {
     return (result as { rowCount?: number }).rowCount ?? 0;
   }
 
+  async insertBundleSuspect(s: {
+    mint: string; symbol: string; detectionMc: number;
+    triggerSol: number; triggerWallet: string; score: number;
+    knownGang: boolean; hasSocial: boolean;
+  }): Promise<void> {
+    if (!this.pool) return;
+    await this.pool.query(
+      `INSERT INTO bundle_suspects
+         (mint, symbol, detection_mc, trigger_sol, trigger_wallet, score, known_gang, has_social)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT DO NOTHING`,
+      [s.mint, s.symbol, s.detectionMc, s.triggerSol, s.triggerWallet, s.score, s.knownGang, s.hasSocial]
+    );
+  }
+
+  async insertBundleLiveTrade(t: {
+    mint: string; symbol: string; side: string; sol: number;
+    entryMc?: number; exitMc?: number; pnl?: number; reason?: string;
+  }): Promise<void> {
+    if (!this.pool) return;
+    await this.pool.query(
+      `INSERT INTO bundle_live_trades (mint, symbol, side, sol, entry_mc, exit_mc, pnl, reason)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [t.mint, t.symbol, t.side, t.sol, t.entryMc ?? null, t.exitMc ?? null, t.pnl ?? null, t.reason ?? null]
+    );
+  }
+
   async insertAlert(alert: AlertEvent): Promise<void> {
     if (!this.pool) return;
     await this.pool.query(`INSERT INTO alerts (id, mint, severity, alert_type, message, created_at) VALUES ($1,$2,$3,$4,$5,$6)`, [

@@ -109,7 +109,23 @@ export class RuntimeEngine {
       persistState: (s) => void this.repo.savePaperState(s).catch((err) => console.warn("[paper] state persist failed:", err instanceof Error ? err.message : err))
     });
     // Wire bundle tracker → bundle live trader: any new suspect immediately triggers entry evaluation.
-    this.bundle.setOnNewSuspect((s) => this.bundleLive.onSuspect(s));
+    this.bundleLive.setOnTradeLog((t) => {
+      void this.repo.insertBundleLiveTrade({
+        mint: t.mint, symbol: t.symbol, side: "sell",
+        sol: t.solOut, entryMc: t.entryMc, exitMc: t.exitMc,
+        pnl: t.pnl, reason: t.reason,
+      });
+    });
+
+    this.bundle.setOnNewSuspect((s) => {
+      this.bundleLive.onSuspect(s);
+      // Persist every detected suspect so we can audit "what should we have bought?"
+      void this.repo.insertBundleSuspect({
+        mint: s.mint, symbol: s.symbol, detectionMc: s.detectionMc,
+        triggerSol: s.largestBuySol, triggerWallet: s.gangWallets[0] ?? "",
+        score: s.score, knownGang: s.knownGangCount > 0, hasSocial: s.hasSocial,
+      });
+    });
   }
 
   /** Restore a previously persisted paper run on boot (after migrations). */

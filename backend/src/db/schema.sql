@@ -231,6 +231,34 @@ EXCEPTION
 END
 $$;
 
+-- Bundle sniper: persistent log of every detected suspect and every live trade.
+-- Used for retrospective audits: "what should we have bought but didn't?"
+CREATE TABLE IF NOT EXISTS bundle_suspects (
+  id          BIGSERIAL PRIMARY KEY,
+  mint        TEXT NOT NULL,
+  symbol      TEXT NOT NULL DEFAULT '?',
+  detected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  detection_mc NUMERIC NOT NULL DEFAULT 0,
+  trigger_sol  NUMERIC NOT NULL DEFAULT 0,
+  trigger_wallet TEXT NOT NULL DEFAULT '',
+  score        INTEGER NOT NULL DEFAULT 0,
+  known_gang   BOOLEAN NOT NULL DEFAULT FALSE,
+  has_social   BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS bundle_live_trades (
+  id         BIGSERIAL PRIMARY KEY,
+  mint       TEXT NOT NULL,
+  symbol     TEXT NOT NULL DEFAULT '?',
+  side       TEXT NOT NULL,        -- 'buy' | 'sell'
+  sol        NUMERIC NOT NULL,
+  entry_mc   NUMERIC,
+  exit_mc    NUMERIC,
+  pnl        NUMERIC,
+  reason     TEXT,
+  ts         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- NOTE: indexes are intentionally NOT created here. On large tables a
 -- non-concurrent CREATE INDEX takes minutes and locks writes, which blocks
 -- boot and fails the healthcheck. They are created CONCURRENTLY in the
