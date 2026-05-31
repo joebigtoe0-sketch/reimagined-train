@@ -162,36 +162,9 @@ export class BundleTracker {
     if (!this.tokenBornAt.has(event.mint)) {
       this.tokenBornAt.set(event.mint, bornAt);
     }
-
-    // Same-block / same-tx bundle: the creator bought ≥7 SOL in the create tx.
-    // Detect immediately — no need to wait for a subscribeTokenTrade event that
-    // may never arrive in time (Jito bundle, same block as deploy).
-    const initialBuySol = typeof event.metadata?.initialBuySol === "number"
-      ? event.metadata.initialBuySol : 0;
-    if (initialBuySol >= MIN_TRIGGER_SOL && !this.suspects.has(event.mint)) {
-      const mc = event.marketCap || 0;
-      if (mc < PRE_BUNDLE_MC || mc === 0) {
-        const isKnownGang = this.gangWallets.has(event.wallet);
-        const newSuspect: Suspect = {
-          mint: event.mint,
-          symbol: typeof event.metadata?.symbol === "string" ? event.metadata.symbol : "?",
-          detectedAt: bornAt,
-          detectionMc: mc,
-          currentMc: mc,
-          whaleBuyers: new Set([event.wallet]),
-          knownGangBuyers: isKnownGang ? new Set([event.wallet]) : new Set(),
-          totalBuys: 1,
-          totalSells: 0,
-          largestBuySol: initialBuySol,
-          hasSocial: !!(event.metadata?.website || event.metadata?.twitter || event.metadata?.telegram),
-        };
-        this.suspects.set(event.mint, newSuspect);
-        this.totalDetected++;
-        const gangTag = isKnownGang ? " [KNOWN GANG ✓]" : "";
-        console.log(`[BundleTracker] SAME-BLOCK ${event.mint.slice(0, 8)}… MC=$${Math.round(mc)} sol=${initialBuySol.toFixed(2)}${gangTag}`);
-        if (this.onNewSuspect) this.onNewSuspect(toPublic(newSuspect));
-      }
-    }
+    // NOTE: event.wallet here is the DEV wallet (creator). We intentionally do
+    // NOT trigger on the dev's initial buy — we need a DIFFERENT wallet buying
+    // ≥7 SOL. That signal comes through onTrade() via subscribeTokenTrade.
   }
 
   /** Called on every trade event from the runtime engine. */

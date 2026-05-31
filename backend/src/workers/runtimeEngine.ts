@@ -376,10 +376,9 @@ export class RuntimeEngine {
         metadata: {
           name:     pt.name,
           symbol:   pt.symbol,
-          ...(pt.website       ? { website:      pt.website       } : {}),
-          ...(pt.twitter       ? { twitter:      pt.twitter       } : {}),
-          ...(pt.telegram      ? { telegram:     pt.telegram      } : {}),
-          ...(pt.initialBuySol ? { initialBuySol: pt.initialBuySol } : {}),
+          ...(pt.website  ? { website:  pt.website  } : {}),
+          ...(pt.twitter  ? { twitter:  pt.twitter  } : {}),
+          ...(pt.telegram ? { telegram: pt.telegram } : {}),
         }
       };
       await this.queueAdapter.publish([launchEvent]);
