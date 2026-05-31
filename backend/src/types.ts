@@ -16,6 +16,9 @@ export interface TokenState {
   symbol: string;
   devWallet: string;
   createdAt: string;
+  website?: string;
+  twitter?: string;
+  telegram?: string;
   marketCap: number;
   athMarketCap: number;
   holderCount: number;

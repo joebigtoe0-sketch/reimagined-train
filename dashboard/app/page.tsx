@@ -1626,6 +1626,12 @@ function BundleSniperPanel({ bundle, bundleLive, onBundleLiveControl }: {
                   <span style={{ color: s.largestBuySol >= 7 ? "var(--up)" : "var(--fg)" }}>{s.largestBuySol.toFixed(2)}◎</span>
                 </div>
                 <div><span className="dim">buys </span><span style={{ color: "var(--fg)" }}>{s.totalBuys}</span></div>
+                <div>
+                  <span className="dim">socials </span>
+                  <span style={{ color: s.hasSocial ? "var(--up)" : "var(--text-3)" }}>
+                    {s.hasSocial ? "✓ yes" : "none"}
+                  </span>
+                </div>
               </div>
 
               {s.gangWallets.length > 0 && (

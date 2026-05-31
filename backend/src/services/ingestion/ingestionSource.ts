@@ -14,6 +14,10 @@ export interface LaunchInfo {
   devWallet: string;
   /** Optional initial market cap in USD (PumpPortal supplies one on creation). */
   initialMarketCapUsd?: number;
+  /** Social links from token metadata — available on PumpPortal create events. */
+  website?: string;
+  twitter?: string;
+  telegram?: string;
 }
 
 export interface TradeInfo {

@@ -153,6 +153,7 @@ export type BundleSuspect = {
   totalSells: number;
   buyToSellRatio: number;
   largestBuySol: number;
+  hasSocial: boolean;
   score: number;
 };
 

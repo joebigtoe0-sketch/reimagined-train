@@ -40,6 +40,7 @@ const SCORE_BASE_TRIGGER   = 60;  // first ≥7 SOL buy (any wallet)
 const SCORE_PER_EXTRA_BUYER = 15; // each additional ≥7 SOL buyer
 const SCORE_BUYER_CAP       = 90; // cap from buyer count
 const SCORE_KNOWN_GANG      = 10; // bonus: triggering wallet is a known gang wallet
+const SCORE_HAS_SOCIAL      =  5; // bonus: token has website/twitter/telegram (slightly more legit project)
 const SCORE_VERY_EARLY      = 10; // MC < 5k at detection
 const SCORE_EARLY           =  5; // MC < 12k at detection
 
@@ -58,6 +59,7 @@ export interface BundleSuspect {
   totalSells: number;
   buyToSellRatio: number;
   largestBuySol: number;
+  hasSocial: boolean;
   score: number;
 }
 
@@ -81,14 +83,15 @@ interface Suspect {
   totalBuys: number;
   totalSells: number;
   largestBuySol: number;
+  hasSocial: boolean; // website, twitter or telegram set
 }
 
 function calcScore(s: Suspect): number {
   if (s.whaleBuyers.size === 0) return 0;
   let score = SCORE_BASE_TRIGGER;
   score += Math.min(SCORE_BUYER_CAP - SCORE_BASE_TRIGGER, (s.whaleBuyers.size - 1) * SCORE_PER_EXTRA_BUYER);
-  // Bonus if any triggering wallet is a known gang wallet (higher certainty)
   if (s.knownGangBuyers.size > 0) score += SCORE_KNOWN_GANG;
+  if (s.hasSocial) score += SCORE_HAS_SOCIAL;
   if (s.detectionMc < 5_000) score += SCORE_VERY_EARLY;
   else if (s.detectionMc < 12_000) score += SCORE_EARLY;
   return Math.min(100, score);
@@ -109,6 +112,7 @@ function toPublic(s: Suspect): BundleSuspect {
     totalSells: s.totalSells,
     buyToSellRatio: +bs.toFixed(2),
     largestBuySol: +s.largestBuySol.toFixed(3),
+    hasSocial: s.hasSocial,
     score: calcScore(s),
   };
 }
@@ -174,6 +178,7 @@ export class BundleTracker {
       totalBuys: 1,
       totalSells: 0,
       largestBuySol: sol,
+      hasSocial: false, // updated when TokenState arrives with metadata
     };
     this.suspects.set(event.mint, newSuspect);
     this.totalDetected++;
@@ -194,6 +199,9 @@ export class BundleTracker {
     if (!s) return;
     if (token.symbol) s.symbol = token.symbol;
     if (token.marketCap > 0) s.currentMc = token.marketCap;
+    if (!s.hasSocial && (token.website || token.twitter || token.telegram)) {
+      s.hasSocial = true;
+    }
 
     // Expire: too old, or token already well past bundle phase
     const age = Date.now() - s.detectedAt;

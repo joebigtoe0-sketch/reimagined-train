@@ -373,7 +373,13 @@ export class RuntimeEngine {
         marketCap: pt.initialMarketCapUsd ?? 0,
         participants: pt.devWallet ? [pt.devWallet] : [],
         mints: [pt.mint],
-        metadata: { name: pt.name, symbol: pt.symbol }
+        metadata: {
+          name:     pt.name,
+          symbol:   pt.symbol,
+          ...(pt.website  ? { website:  pt.website  } : {}),
+          ...(pt.twitter  ? { twitter:  pt.twitter  } : {}),
+          ...(pt.telegram ? { telegram: pt.telegram } : {}),
+        }
       };
       await this.queueAdapter.publish([launchEvent]);
 
@@ -535,6 +541,9 @@ export class RuntimeEngine {
         symbol: metaSymbol || event.mint.slice(0, 6).toUpperCase(),
         devWallet: inferredDev ?? randomDev(event.wallet),
         createdAt: event.timestamp,
+        website:  typeof event.metadata?.website  === "string" ? event.metadata.website  : undefined,
+        twitter:  typeof event.metadata?.twitter  === "string" ? event.metadata.twitter  : undefined,
+        telegram: typeof event.metadata?.telegram === "string" ? event.metadata.telegram : undefined,
         marketCap: Math.max(1_000, event.marketCap || 3_000),
         athMarketCap: Math.max(1_000, event.marketCap || 3_000),
         holderCount: 1,

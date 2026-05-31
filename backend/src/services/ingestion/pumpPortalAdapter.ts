@@ -36,6 +36,11 @@ interface PumpPortalMessage {
   name?: string;
   symbol?: string;
   pool?: string;
+  // Social metadata — present on txType="create" events
+  website?: string;
+  twitter?: string;
+  telegram?: string;
+  description?: string;
 }
 
 export class PumpPortalAdapter implements IngestionSource {
@@ -198,7 +203,10 @@ export class PumpPortalAdapter implements IngestionSource {
         symbol: msg.symbol?.trim() || msg.mint.slice(0, 6).toUpperCase(),
         createdAt: new Date().toISOString(),
         devWallet: msg.traderPublicKey ?? "",
-        initialMarketCapUsd: mcUsd > 0 ? Math.round(mcUsd) : undefined
+        initialMarketCapUsd: mcUsd > 0 ? Math.round(mcUsd) : undefined,
+        website:  msg.website?.trim()  || undefined,
+        twitter:  msg.twitter?.trim()  || undefined,
+        telegram: msg.telegram?.trim() || undefined,
       });
       this.capSet(this.seenMints, 50_000, 25_000);
       return;
