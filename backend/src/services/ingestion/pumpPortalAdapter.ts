@@ -539,20 +539,13 @@ export class PumpPortalAdapter implements IngestionSource {
     // Returned newest-first; reverse so we process oldest (creation block) first
     const sigs = [...rawSigs].reverse();
 
+    // A Jito bundle = the create tx + buy tx(s) landing in the SAME SLOT (block).
+    // We read the creation slot from the first (oldest) bonding-curve tx, then ONLY
+    // count ≥7 SOL buys that land in that EXACT slot. Buys in any later slot — even
+    // ~1s later (e.g. MAYHEM-mode snipes) — are NOT same-block bundles → ignored.
+    let createSlot: number | null = null;
+
     for (const sigInfo of sigs) {
-      const sigAge = sigInfo.blockTime
-        ? sigInfo.blockTime * 1000 - createdAtMs
-        : 0;
-
-      // Only look at transactions within 5s of creation — Jito bundles are same-block (0s).
-      // Allow a 5s margin for RPC blockTime vs wall-clock createdAtMs skew.
-      if (sigInfo.blockTime && sigInfo.blockTime * 1000 > createdAtMs + 5_000) {
-        console.log(`${tag} skip sig ${sigInfo.signature.slice(0, 12)} — too late (${Math.round(sigAge / 1000)}s after create)`);
-        continue;
-      }
-
-      console.log(`${tag} fetching tx ${sigInfo.signature.slice(0, 12)} (blockTime offset ~${Math.round(sigAge)}ms)`);
-
       // Small pause to respect RPC rate limits
       await new Promise<void>((resolve) => setTimeout(resolve, 250));
 
@@ -564,6 +557,7 @@ export class PumpPortalAdapter implements IngestionSource {
           { encoding: "json", maxSupportedTransactionVersion: 0, commitment: "confirmed" },
         ],
       })) as {
+        slot?: number;
         transaction?: {
           message?: {
             // Legacy transactions
@@ -572,7 +566,12 @@ export class PumpPortalAdapter implements IngestionSource {
             staticAccountKeys?: string[];
           };
         };
-        meta?: { preBalances?: number[]; postBalances?: number[] };
+        meta?: {
+          preBalances?: number[];
+          postBalances?: number[];
+          // V0 ALT-resolved pubkeys — appended after staticAccountKeys in balance order
+          loadedAddresses?: { writable?: string[]; readonly?: string[] };
+        };
       } | null;
 
       if (!tx) {
@@ -580,32 +579,56 @@ export class PumpPortalAdapter implements IngestionSource {
         continue;
       }
 
+      const txSlot = tx.slot ?? null;
+
+      // First processed tx is the create — its slot defines the bundle block.
+      if (createSlot === null) {
+        createSlot = txSlot;
+        console.log(`${tag} creation slot = ${createSlot ?? "unknown"} (sig ${sigInfo.signature.slice(0, 12)})`);
+      }
+
+      // Once we pass the creation slot, no more same-block txs are possible — stop.
+      if (createSlot !== null && txSlot !== null && txSlot > createSlot) {
+        console.log(`${tag} slot ${txSlot} > creation slot ${createSlot} — past bundle block, stopping`);
+        break;
+      }
+
+      // Defensive: skip anything before the creation slot (shouldn't happen).
+      if (createSlot !== null && txSlot !== null && txSlot < createSlot) continue;
+
+      console.log(`${tag} checking tx ${sigInfo.signature.slice(0, 12)} (slot ${txSlot ?? "?"})`);
+
       // V0 transactions use staticAccountKeys; legacy use accountKeys — check both
       const msg  = tx.transaction?.message;
-      const keys = msg?.staticAccountKeys ?? msg?.accountKeys ?? [];
+      const staticKeys = (msg?.staticAccountKeys ?? msg?.accountKeys ?? []).map((k) =>
+        typeof k === "string" ? k : (k as Record<string,string>).pubkey ?? "",
+      );
+      // The full account list (matching pre/post balance order) is:
+      //   staticAccountKeys ++ loadedAddresses.writable ++ loadedAddresses.readonly
+      // Appending the ALT-resolved addresses lets us read the REAL buyer pubkey for
+      // V0 Jito bundle buys instead of a placeholder.
+      const loadedWritable = tx.meta?.loadedAddresses?.writable ?? [];
+      const loadedReadonly = tx.meta?.loadedAddresses?.readonly ?? [];
+      const keys = [...staticKeys, ...loadedWritable, ...loadedReadonly];
+
       const pre  = tx.meta?.preBalances  ?? [];
       const post = tx.meta?.postBalances ?? [];
 
-      // CRITICAL: pre/post balance arrays cover ALL accounts including ALT-loaded ones
-      // (indices >= keys.length). We must iterate over ALL balance entries, not just
-      // staticAccountKeys, otherwise V0 Jito bundle buyers loaded via ALTs are invisible.
+      // pre/post balance arrays cover ALL accounts including ALT-loaded ones.
       const totalAccounts = pre.length;
-      console.log(`${tag} tx has ${keys.length} static keys, ${totalAccounts} balance entries (${totalAccounts - keys.length} ALT-loaded)`);
+      console.log(`${tag} tx has ${staticKeys.length} static + ${loadedWritable.length + loadedReadonly.length} ALT keys, ${totalAccounts} balance entries`);
 
-      // Build changes for every account index — use address if known, otherwise placeholder
+      // Build changes for every account index — resolve real address when possible.
       const changes = Array.from({ length: totalAccounts }, (_, i) => {
-        const keyEntry = keys[i];
-        const account  = keyEntry
-          ? (typeof keyEntry === "string" ? keyEntry : (keyEntry as Record<string,string>).pubkey ?? `idx-${i}`)
-          : `alt-loaded-${i}`;
-        return { account, delta: (post[i] ?? 0) - (pre[i] ?? 0) };
+        const account = keys[i] || `idx-${i}`;
+        return { account, delta: (post[i] ?? 0) - (pre[i] ?? 0), isAlt: i >= staticKeys.length };
       });
 
       const biggest = [...changes].sort((a, b) => a.delta - b.delta).slice(0, 3);
       biggest.forEach((c) => {
         const solDelta = (c.delta / 1e9).toFixed(4);
         const isDevTag = c.account === devWallet ? " [DEV]" : "";
-        const isAlt    = c.account.startsWith("alt-loaded-") ? " [ALT]" : "";
+        const isAlt    = c.isAlt ? " [ALT]" : "";
         console.log(`${tag}   ${c.account.slice(0, 12)} Δ=${solDelta} SOL${isDevTag}${isAlt}`);
       });
 
