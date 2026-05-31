@@ -16,8 +16,26 @@
  */
 
 import { WebSocket } from "ws";
+import { PublicKey } from "@solana/web3.js";
 import { env } from "../../config/env.js";
 import type { IngestionSource, LaunchInfo, TradeInfo, MigrationInfo } from "./ingestionSource.js";
+
+// Pump.fun on-chain program — used to derive the bonding curve PDA for each token.
+const PUMP_PROGRAM_ID = new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
+
+/**
+ * Derive the pump.fun bonding curve PDA for a given mint.
+ * Every pump.fun buy/sell touches this account directly (in staticAccountKeys),
+ * so querying getSignaturesForAddress(bondingCurve) reliably returns ALL trades —
+ * even Jito V0 bundle transactions that only reference the mint via an ALT.
+ */
+function bondingCurvePda(mint: string): string {
+  const [pda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("bonding-curve"), new PublicKey(mint).toBytes()],
+    PUMP_PROGRAM_ID,
+  );
+  return pda.toBase58();
+}
 
 const BASE_URL = "wss://pumpportal.fun/api/data";
 const PUMP_TOKEN_SUPPLY = 1_000_000_000;
@@ -252,8 +270,14 @@ export class PumpPortalAdapter implements IngestionSource {
           800
         );
         setTimeout(
-          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createdAtMs, true),
+          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createdAtMs, false),
           2000
+        );
+        // Final sweep at T+8s: catches fast-follow buys (T+3–7s) that weren't
+        // indexed yet at T+2s but are within our 15s window.
+        setTimeout(
+          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createdAtMs, true),
+          8000
         );
       }
 
@@ -473,12 +497,23 @@ export class PumpPortalAdapter implements IngestionSource {
       return d.result;
     };
 
-    console.log(`${tag} firing via ${rpcLabel}`);
+    // Derive the bonding curve PDA — every pump.fun buy/sell has this in
+    // staticAccountKeys, even Jito V0 bundle txs that reference the mint only
+    // via an ALT (which is why getSignaturesForAddress(MINT) misses them).
+    let bondingCurve: string;
+    try {
+      bondingCurve = bondingCurvePda(mint);
+    } catch {
+      console.warn(`${tag} failed to derive bonding curve PDA — skipping`);
+      return;
+    }
+
+    console.log(`${tag} firing via ${rpcLabel} (bonding curve: ${bondingCurve.slice(0, 8)})`);
 
     const rawSigs = (await rpcCall({
       jsonrpc: "2.0", id: 1,
       method:  "getSignaturesForAddress",
-      params:  [mint, { limit: 5 }],
+      params:  [bondingCurve, { limit: 10 }],
     })) as Array<{ signature: string; blockTime?: number }> | null;
 
     if (!rawSigs || rawSigs.length === 0) {
@@ -503,8 +538,8 @@ export class PumpPortalAdapter implements IngestionSource {
         ? sigInfo.blockTime * 1000 - createdAtMs
         : 0;
 
-      // Skip transactions clearly after the creation window
-      if (sigInfo.blockTime && sigInfo.blockTime * 1000 > createdAtMs + 5_000) {
+      // Skip transactions clearly after the bundle window (15s matches TOKEN_AGE_LIMIT_MS)
+      if (sigInfo.blockTime && sigInfo.blockTime * 1000 > createdAtMs + 15_000) {
         console.log(`${tag} skip sig ${sigInfo.signature.slice(0, 12)} — too late (${Math.round(sigAge / 1000)}s after create)`);
         continue;
       }
