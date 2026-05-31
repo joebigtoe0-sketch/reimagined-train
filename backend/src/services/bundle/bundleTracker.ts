@@ -2,9 +2,9 @@
  * BundleTracker — real-time monitor for the "slow-crawl → bundle-pump → migrate" pattern.
  *
  * Detection gate (behavioral — no wallet list required):
- *   ANY wallet that buys ≥7 SOL before 18k MC AND within 2 min of token creation.
- *   The 2-min window ensures we catch the gang's initial bundle load, not random
- *   late whales buying an already-running token.
+ *   ANY wallet that buys ≥7 SOL before 18k MC AND within 10s of token creation.
+ *   Real bundle gangs buy in the same block or within seconds of deployment.
+ *   Anything later is a random whale buying an already-running token.
  *
  * Backtest (44.6M trades, 30 days):
  *   17,316 triggers/month  |  22.4% reach migration  |  3.9× better than random
@@ -36,8 +36,8 @@ const EXPIRE_MC       = 40_000;
 // ANY wallet buying ≥7 SOL before 18k MC → 22.4% reach migration (3.9× baseline)
 const MIN_TRIGGER_SOL = 7;
 // Only trigger if the whale buy happens within this window of token creation.
-// Bundle gangs load up in the first 30-60s; late big buys are random whales, not gang.
-const TOKEN_AGE_LIMIT_MS = 2 * 60_000; // 2 minutes
+// Real bundle gangs buy in the same block or within seconds of deployment.
+const TOKEN_AGE_LIMIT_MS = 10_000; // 10 seconds
 
 // ─── scoring ──────────────────────────────────────────────────────────────────
 const SCORE_BASE_TRIGGER   = 60;  // first ≥7 SOL buy (any wallet)
