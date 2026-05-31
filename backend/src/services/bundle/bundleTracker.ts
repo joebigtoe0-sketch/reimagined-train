@@ -183,8 +183,11 @@ export class BundleTracker {
     const bornAt     = this.tokenBornAt.get(event.mint)!;
     const tokenAgeMs = tradeTime - bornAt;
 
+    // Skip dev self-buy — backtest shows dev-triggered = +7.5% avg vs +77.5% for others
+    if (event.devWallet && event.wallet === event.devWallet) return;
+
     const isKnownGang    = this.gangWallets.has(event.wallet);
-    // Whale buy must be early — gang loads within first 2 min of launch
+    // Whale buy must be early — gang loads within first 10s of launch
     const isWhaleBuy     = sol >= MIN_TRIGGER_SOL
       && (mc < PRE_BUNDLE_MC || mc === 0)
       && tokenAgeMs < TOKEN_AGE_LIMIT_MS;

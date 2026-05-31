@@ -506,7 +506,11 @@ export class RuntimeEngine {
           this.playbook.observe(token, event);
           this.paper.onTrade(token, event);
           this.live.onTrade(token, event);
-          if (event.side === "buy") this.bundle.onTrade(event);
+          if (event.side === "buy") {
+            // Pass devWallet so BundleTracker can skip dev self-buys.
+            // Backtest: dev-triggered = +7.5% avg PnL vs non-dev = +77.5%.
+            this.bundle.onTrade({ ...event, devWallet: token.devWallet });
+          }
           else if (event.side === "sell") this.bundle.onSell(event);
         }
         // Force-persist the graduation label immediately — it's a rare, terminal
