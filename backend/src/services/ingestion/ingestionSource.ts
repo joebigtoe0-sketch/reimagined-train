@@ -14,6 +14,13 @@ export interface LaunchInfo {
   devWallet: string;
   /** Optional initial market cap in USD (PumpPortal supplies one on creation). */
   initialMarketCapUsd?: number;
+  /**
+   * SOL amount bought by the creator in the SAME transaction as the token creation.
+   * For same-block Jito bundles the gang often buys in the create tx itself —
+   * this field lets the bundle detector fire immediately without waiting for a
+   * subscribeTokenTrade event that might never arrive in time.
+   */
+  initialBuySol?: number;
   /** Social links from token metadata — available on PumpPortal create events. */
   website?: string;
   twitter?: string;

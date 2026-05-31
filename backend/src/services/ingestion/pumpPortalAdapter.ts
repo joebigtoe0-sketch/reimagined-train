@@ -215,6 +215,7 @@ export class PumpPortalAdapter implements IngestionSource {
         createdAt: new Date().toISOString(),
         devWallet: msg.traderPublicKey ?? "",
         initialMarketCapUsd: mcUsd > 0 ? Math.round(mcUsd) : undefined,
+        initialBuySol: msg.solAmount ?? 0,
         website:  msg.website?.trim()  || undefined,
         twitter:  msg.twitter?.trim()  || undefined,
         telegram: msg.telegram?.trim() || undefined,
