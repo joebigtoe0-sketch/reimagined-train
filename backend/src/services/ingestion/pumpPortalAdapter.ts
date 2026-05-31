@@ -62,6 +62,8 @@ export class PumpPortalAdapter implements IngestionSource {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private awaitingPong = false;
+  // Debug: tracks recently-created mints so we can log what arrives within 3s
+  private _debugWindows = new Map<string, { createdAt: number; devWallet: string }>();
 
   /** Launches are free, so this provider is always usable. */
   get available(): boolean {
@@ -230,10 +232,32 @@ export class PumpPortalAdapter implements IngestionSource {
         this.earlySubMints.set(msg.mint, Date.now());
         this.send({ method: "subscribeTokenTrade", keys: [msg.mint] });
       }
+
+      // DEBUG: log every message that arrives within 3s of this token's creation
+      // so we can see if PumpPortal delivers same-block buys from other wallets.
+      if (process.env.BUNDLE_DEBUG === "true") {
+        const mintShort = msg.mint.slice(0, 8);
+        const createdAt = Date.now();
+        console.log(`[BundleDebug] CREATE ${mintShort} sol=${msg.solAmount ?? 0} dev=${(msg.traderPublicKey ?? "").slice(0,8)}`);
+        // Attach a short-lived listener to log anything that arrives for this mint in next 3s
+        this._debugWindows.set(msg.mint, { createdAt, devWallet: msg.traderPublicKey ?? "" });
+        setTimeout(() => { if (msg.mint) this._debugWindows.delete(msg.mint); }, 3000);
+      }
       return;
     }
 
     if ((msg.txType === "buy" || msg.txType === "sell") && msg.mint && msg.signature) {
+      // DEBUG: if this trade arrives within the 3s window of a token creation, log it
+      if (process.env.BUNDLE_DEBUG === "true") {
+        const dbg = this._debugWindows.get(msg.mint);
+        if (dbg) {
+          const delayMs = Date.now() - dbg.createdAt;
+          const isDevWallet = msg.traderPublicKey === dbg.devWallet;
+          const tag = isDevWallet ? "DEV" : "OTHER";
+          console.log(`[BundleDebug]   ${msg.txType.toUpperCase()} ${msg.mint.slice(0,8)} +${delayMs}ms sol=${msg.solAmount ?? 0} wallet=${tag}(${(msg.traderPublicKey ?? "").slice(0,8)}) via=subscribeNewToken`);
+        }
+      }
+
       const dedupKey = `${msg.signature}:${msg.mint}:${msg.txType}`;
       if (this.seenTradeSigs.has(dedupKey)) return;
       this.seenTradeSigs.add(dedupKey);
