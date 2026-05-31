@@ -18,6 +18,7 @@
 import { WebSocket } from "ws";
 import { env } from "../../config/env.js";
 import type { IngestionSource, LaunchInfo, TradeInfo, MigrationInfo } from "./ingestionSource.js";
+import { decodeEnhancedTransactions } from "./heliusDecoder.js";
 
 const BASE_URL = "wss://pumpportal.fun/api/data";
 const PUMP_TOKEN_SUPPLY = 1_000_000_000;
@@ -233,6 +234,20 @@ export class PumpPortalAdapter implements IngestionSource {
         this.send({ method: "subscribeTokenTrade", keys: [msg.mint] });
       }
 
+      // Jito bundle safety net: same-block buys (create + gang buy in one bundle)
+      // are NEVER delivered via subscribeTokenTrade because our subscription
+      // doesn't exist yet when PumpPortal broadcasts that block. Patch the gap
+      // by querying Helius 700 ms later to catch any large early buy we missed.
+      if (env.HELIUS_API_KEY) {
+        const mintSnap      = msg.mint;
+        const devWalletSnap = msg.traderPublicKey ?? "";
+        const createdAtMs   = Date.now();
+        setTimeout(
+          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createdAtMs),
+          700
+        );
+      }
+
       // DEBUG: log every message that arrives within 3s of this token's creation
       // so we can see if PumpPortal delivers same-block buys from other wallets.
       if (process.env.BUNDLE_DEBUG === "true") {
@@ -339,6 +354,65 @@ export class PumpPortalAdapter implements IngestionSource {
     const out = this.tradeBuffer;
     this.tradeBuffer = [];
     return out;
+  }
+
+  /**
+   * Called 700 ms after a create event to catch Jito-bundle same-block buys
+   * that PumpPortal's subscribeTokenTrade missed (subscription didn't exist yet
+   * when PumpPortal broadcast that block). Queries Helius enhanced-transaction
+   * history for the mint, parses results with the existing decoder, and injects
+   * any qualifying large buy into tradeBuffer.
+   */
+  private async heliusCatchEarlyBuy(
+    mint: string,
+    devWallet: string,
+    createdAtMs: number
+  ): Promise<void> {
+    try {
+      const url =
+        `https://api.helius.xyz/v0/addresses/${mint}/transactions` +
+        `?api-key=${env.HELIUS_API_KEY}&limit=5`;
+      const resp = await fetch(url);
+      if (!resp.ok) return;
+
+      const payload = (await resp.json()) as unknown;
+      const events  = decodeEnhancedTransactions(payload);
+
+      for (const ev of events) {
+        if (ev.type !== "trade" || ev.side !== "buy") continue;
+        if (!ev.mint || ev.mint === "UNKNOWN_MINT" || ev.mint !== mint) continue;
+        if (!ev.wallet || ev.wallet === devWallet) continue;
+        const sol = ev.amountSol ?? 0;
+        if (sol < 7) continue;
+        // Only buys that happened within 3 s of our create-received timestamp
+        // (ev.timestamp is the on-chain slot time in ms — slightly behind our clock)
+        if (ev.timestamp > createdAtMs + 3_000) continue;
+
+        const dedupKey = `${ev.signature}:${mint}:buy`;
+        if (this.seenTradeSigs.has(dedupKey)) continue;
+        this.seenTradeSigs.add(dedupKey);
+
+        this.tradeBuffer.push({
+          mint,
+          traderWallet: ev.wallet,
+          side:         "buy",
+          amountSol:    sol,
+          tokenAmount:  0,
+          priceUsd:     0,
+          marketCap:    ev.marketCap ?? 0,
+          signature:    ev.signature,
+          timestamp:    new Date(ev.timestamp).toISOString(),
+        });
+
+        console.log(
+          `[PumpPortal] ⚡ Helius retrocheck: ${mint.slice(0, 8)} ` +
+          `+${sol.toFixed(2)} SOL from ${ev.wallet.slice(0, 8)} ` +
+          `(same-block Jito — was missed by WS subscription)`
+        );
+      }
+    } catch {
+      // Non-critical — never block the main flow
+    }
   }
 
   private capSet(set: Set<string>, max: number, keep: number): void {
