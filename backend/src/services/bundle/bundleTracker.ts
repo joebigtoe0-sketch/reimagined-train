@@ -2,8 +2,9 @@
  * BundleTracker — real-time monitor for the "slow-crawl → bundle-pump → migrate" pattern.
  *
  * Detection gate (behavioral — no wallet list required):
- *   ANY wallet that buys ≥7 SOL before 18k MC triggers a new suspect.
- *   This catches ALL gangs / teams running this play, not just known wallets.
+ *   ANY wallet that buys ≥7 SOL before 18k MC AND within 2 min of token creation.
+ *   The 2-min window ensures we catch the gang's initial bundle load, not random
+ *   late whales buying an already-running token.
  *
  * Backtest (44.6M trades, 30 days):
  *   17,316 triggers/month  |  22.4% reach migration  |  3.9× better than random
@@ -34,6 +35,9 @@ const EXPIRE_MC       = 40_000;
 // Behavioral gate — from splitexit.mjs / behaviorgate.mjs validation:
 // ANY wallet buying ≥7 SOL before 18k MC → 22.4% reach migration (3.9× baseline)
 const MIN_TRIGGER_SOL = 7;
+// Only trigger if the whale buy happens within this window of token creation.
+// Bundle gangs load up in the first 30-60s; late big buys are random whales, not gang.
+const TOKEN_AGE_LIMIT_MS = 2 * 60_000; // 2 minutes
 
 // ─── scoring ──────────────────────────────────────────────────────────────────
 const SCORE_BASE_TRIGGER   = 60;  // first ≥7 SOL buy (any wallet)
@@ -121,6 +125,8 @@ export class BundleTracker {
   /** Known gang wallets — used for scoring bonus only, NOT as an entry gate. */
   private readonly gangWallets: Set<string> = new Set();
   private readonly suspects = new Map<string, Suspect>();
+  /** Creation timestamp for each mint — gated so we only trigger on early buys. */
+  private readonly tokenBornAt = new Map<string, number>();
   private totalDetected = 0;
   private onNewSuspect?: (s: BundleSuspect) => void;
 
@@ -149,14 +155,36 @@ export class BundleTracker {
     }
   }
 
+  /** Called on every launch event so we know the token's creation time. */
+  onLaunch(event: CanonicalEvent): void {
+    if (!event.mint) return;
+    if (!this.tokenBornAt.has(event.mint)) {
+      const t = event.timestamp ? new Date(event.timestamp).getTime() : Date.now();
+      this.tokenBornAt.set(event.mint, t);
+    }
+  }
+
   /** Called on every trade event from the runtime engine. */
   onTrade(event: CanonicalEvent): void {
     if (event.type !== "trade" || event.side !== "buy") return;
     if (!event.mint || !event.wallet) return;
     const mc  = event.marketCap || 0;
     const sol = event.amountSol || 0;
+
+    // Derive trade timestamp; fall back to now
+    const tradeTime  = event.timestamp ? new Date(event.timestamp).getTime() : Date.now();
+    // Record birth time on first trade if we don't have it from a launch event
+    if (!this.tokenBornAt.has(event.mint)) {
+      this.tokenBornAt.set(event.mint, tradeTime);
+    }
+    const bornAt     = this.tokenBornAt.get(event.mint)!;
+    const tokenAgeMs = tradeTime - bornAt;
+
     const isKnownGang    = this.gangWallets.has(event.wallet);
-    const isWhaleBuy     = sol >= MIN_TRIGGER_SOL && (mc < PRE_BUNDLE_MC || mc === 0);
+    // Whale buy must be early — gang loads within first 2 min of launch
+    const isWhaleBuy     = sol >= MIN_TRIGGER_SOL
+      && (mc < PRE_BUNDLE_MC || mc === 0)
+      && tokenAgeMs < TOKEN_AGE_LIMIT_MS;
 
     // Update existing suspect on every subsequent buy
     const existing = this.suspects.get(event.mint);
@@ -206,6 +234,13 @@ export class BundleTracker {
 
   /** Called on every token state update — syncs symbol + MC, expires old suspects. */
   onToken(token: TokenState): void {
+    // Capture birth time from createdAt — covers the case where the launch event
+    // arrived after the first trade (out-of-order delivery from PumpPortal).
+    if (token.createdAt && !this.tokenBornAt.has(token.mint)) {
+      const t = new Date(token.createdAt).getTime();
+      if (!isNaN(t)) this.tokenBornAt.set(token.mint, t);
+    }
+
     const s = this.suspects.get(token.mint);
     if (!s) return;
     if (token.symbol) s.symbol = token.symbol;
@@ -238,6 +273,12 @@ export class BundleTracker {
     for (const [mint, s] of this.suspects) {
       if (now - s.detectedAt > SUSPECT_TTL_MS || s.currentMc > EXPIRE_MC) {
         this.suspects.delete(mint);
+      }
+    }
+    // Evict tokenBornAt entries older than 2× TTL (they won't trigger anything new)
+    for (const [mint, bornAt] of this.tokenBornAt) {
+      if (now - bornAt > SUSPECT_TTL_MS * 2) {
+        this.tokenBornAt.delete(mint);
       }
     }
   }

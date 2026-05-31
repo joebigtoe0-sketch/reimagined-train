@@ -483,6 +483,10 @@ export class RuntimeEngine {
         void this.repo.insertEvent(event);
         if (event.type === "trade") void this.repo.insertTrade(event);
         if (!token) continue; // trade/migration on unknown mint — skip
+        if (event.type === "launch") {
+          // Notify BundleTracker of the exact birth time so the age gate works.
+          this.bundle.onLaunch(event);
+        }
         if (event.type === "trade") {
           // Update the playbook's early-window state and maybe fire its BUY,
           // then let the paper bot act (entry on playbookBuy, exit TP3x/SL-10%).
