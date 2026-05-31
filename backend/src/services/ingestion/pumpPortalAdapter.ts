@@ -273,11 +273,15 @@ export class PumpPortalAdapter implements IngestionSource {
           () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createdAtMs, false),
           2000
         );
-        // Final sweep at T+8s: catches fast-follow buys (T+3–7s) that weren't
-        // indexed yet at T+2s but are within our 15s window.
+        // Sweep at T+8s: most Jito bundle txs are indexed by now.
+        setTimeout(
+          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createdAtMs, false),
+          8000
+        );
+        // Final sweep at T+20s: insurance for slow RPC indexers (seen >8s lag on Helius).
         setTimeout(
           () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createdAtMs, true),
-          8000
+          20000
         );
       }
 
@@ -538,8 +542,9 @@ export class PumpPortalAdapter implements IngestionSource {
         ? sigInfo.blockTime * 1000 - createdAtMs
         : 0;
 
-      // Skip transactions clearly after the bundle window (15s matches TOKEN_AGE_LIMIT_MS)
-      if (sigInfo.blockTime && sigInfo.blockTime * 1000 > createdAtMs + 15_000) {
+      // Only look at transactions within 5s of creation — Jito bundles are same-block (0s).
+      // Allow a 5s margin for RPC blockTime vs wall-clock createdAtMs skew.
+      if (sigInfo.blockTime && sigInfo.blockTime * 1000 > createdAtMs + 5_000) {
         console.log(`${tag} skip sig ${sigInfo.signature.slice(0, 12)} — too late (${Math.round(sigAge / 1000)}s after create)`);
         continue;
       }
