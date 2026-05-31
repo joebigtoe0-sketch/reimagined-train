@@ -144,8 +144,11 @@ export type BundleSuspect = {
   detectedAt: string;
   detectionMc: number;
   currentMc: number;
+  /** All wallets that made ≥7 SOL buy (behavioral gate — any wallet) */
   gangWallets: string[];
   gangWalletCount: number;
+  /** How many of those whale buyers are also in the known gang list */
+  knownGangCount: number;
   totalBuys: number;
   totalSells: number;
   buyToSellRatio: number;

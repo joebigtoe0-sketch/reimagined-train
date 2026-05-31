@@ -1,20 +1,20 @@
 /**
- * BundleTracker — real-time monitor for the "slow-crawl → bundle-pump → migrate" scam pattern.
+ * BundleTracker — real-time monitor for the "slow-crawl → bundle-pump → migrate" pattern.
  *
- * How it works:
- *   1. Maintains a set of ~4000 known "gang wallets" identified from historical analysis
- *      (see scripts/bundleexpand.mjs for the methodology).
- *   2. On every incoming trade event: if the wallet is in the gang list AND the token is
- *      still below the bundle threshold MC (< 25k), add / update a BundleSuspect.
- *   3. Each suspect is scored 0–100 based on:
- *        • Number of distinct gang wallets that have bought  (primary signal)
- *        • Buy-to-sell ratio (high = no organic selling pressure)
- *        • Largest single pre-25k buy in SOL            (sybil-wallet size marker)
- *        • How early we first detected it (MC at first ping)
- *   4. Suspects expire 60 min after first detection or when MC exceeds 60k.
+ * Detection gate (behavioral — no wallet list required):
+ *   ANY wallet that buys ≥7 SOL before 18k MC triggers a new suspect.
+ *   This catches ALL gangs / teams running this play, not just known wallets.
  *
- * Backtest result (20 days, 1709 confirmed gang tokens):
- *   Win rate 11.6%  |  avg P&L +8.6%/trade  |  avg winner +435%  (very right-tailed)
+ * Backtest (44.6M trades, 30 days):
+ *   17,316 triggers/month  |  22.4% reach migration  |  3.9× better than random
+ *   Pure trailing stop: avg +7.4% P&L, 31.1% win rate
+ *
+ * Scoring 0–100:
+ *   60  — base: first ≥7 SOL buy (any wallet)
+ *   +15 — per additional ≥7 SOL buyer (cap 90)
+ *   +10 — bonus if ANY triggering wallet is a known gang wallet (higher certainty)
+ *   +10 — very early detection (MC < 5k)
+ *   +5  — early detection (MC < 12k)
  */
 
 import fs from "node:fs";
@@ -24,43 +24,41 @@ import type { CanonicalEvent, TokenState } from "../../types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// MC below which a gang wallet buy is treated as the "accumulation phase"
-const PRE_BUNDLE_MC = 25_000;
+// Accumulation phase: any buy ≥7 SOL BEFORE this MC triggers detection
+const PRE_BUNDLE_MC   = 18_000;
 // Suspects older than this are expired
-const SUSPECT_TTL_MS = 60 * 60_000;
-// Suspects whose MC exceeded this are expired (they already bundled or failed)
-const EXPIRE_MC = 60_000;
+const SUSPECT_TTL_MS  = 60 * 60_000;
+// Suspects past this MC are expired (already migrating / failed)
+const EXPIRE_MC       = 40_000;
 
-// ─── entry quality gate (from bundleswipe.mjs validation) ────────────────────
-// The key differentiator between real gang ops and incidental wallet overlap:
-// real gang operations use ~7-9 SOL per sybil wallet buy.
-// Incidental buys are 0.1-2 SOL. This is the single most predictive signal.
-// A token is not added to suspects at all unless this gate passes.
+// Behavioral gate — from splitexit.mjs / behaviorgate.mjs validation:
+// ANY wallet buying ≥7 SOL before 18k MC → 22.4% reach migration (3.9× baseline)
 const MIN_TRIGGER_SOL = 7;
 
-// ─── scoring weights ──────────────────────────────────────────────────────────
-// The primary signal: presence of a ≥7 SOL gang wallet buy.
-// Once seen, score starts at 60 and increases with confirmation.
-const SCORE_BASE_TRIGGER   = 60; // first qualifying gang wallet buy detected
-const SCORE_PER_EXTRA_WALL = 15; // each additional gang wallet buy ≥7 SOL
-const SCORE_WALL_CAP       = 90; // cap from wallet count
-// Secondary: how early was the detection?
-const SCORE_VERY_EARLY = 10; // MC < 5k
-const SCORE_EARLY      =  5; // MC < 12k
+// ─── scoring ──────────────────────────────────────────────────────────────────
+const SCORE_BASE_TRIGGER   = 60;  // first ≥7 SOL buy (any wallet)
+const SCORE_PER_EXTRA_BUYER = 15; // each additional ≥7 SOL buyer
+const SCORE_BUYER_CAP       = 90; // cap from buyer count
+const SCORE_KNOWN_GANG      = 10; // bonus: triggering wallet is a known gang wallet
+const SCORE_VERY_EARLY      = 10; // MC < 5k at detection
+const SCORE_EARLY           =  5; // MC < 12k at detection
 
 export interface BundleSuspect {
   mint: string;
   symbol: string;
-  detectedAt: string;        // ISO timestamp of first gang wallet buy
-  detectionMc: number;       // MC at first detection
+  detectedAt: string;
+  detectionMc: number;
   currentMc: number;
-  gangWallets: string[];     // distinct gang wallet addresses that bought
+  /** All wallets that made a ≥7 SOL buy (behavioral signal, any wallet) */
+  gangWallets: string[];
   gangWalletCount: number;
+  /** How many of those wallets are in our known gang list (extra confidence) */
+  knownGangCount: number;
   totalBuys: number;
   totalSells: number;
   buyToSellRatio: number;
   largestBuySol: number;
-  score: number;             // 0–100 confidence
+  score: number;
 }
 
 export interface BundleState {
@@ -73,22 +71,24 @@ export interface BundleState {
 interface Suspect {
   mint: string;
   symbol: string;
-  detectedAt: number;        // epoch ms
+  detectedAt: number;
   detectionMc: number;
   currentMc: number;
-  gangWallets: Set<string>;  // all gang wallets seen (any size)
-  qualifyingWallets: Set<string>; // gang wallets with ≥7 SOL buy
+  /** Any wallet with a ≥7 SOL buy (behavioral gate, wallet-list-free) */
+  whaleBuyers: Set<string>;
+  /** Subset of whaleBuyers that are also in the known gang list */
+  knownGangBuyers: Set<string>;
   totalBuys: number;
   totalSells: number;
   largestBuySol: number;
 }
 
 function calcScore(s: Suspect): number {
-  if (s.qualifyingWallets.size === 0) return 0; // gate: no qualifying buy yet
-  // Base from first qualifying buy + extra wallets
+  if (s.whaleBuyers.size === 0) return 0;
   let score = SCORE_BASE_TRIGGER;
-  score += Math.min(SCORE_WALL_CAP - SCORE_BASE_TRIGGER, (s.qualifyingWallets.size - 1) * SCORE_PER_EXTRA_WALL);
-  // Early detection bonus
+  score += Math.min(SCORE_BUYER_CAP - SCORE_BASE_TRIGGER, (s.whaleBuyers.size - 1) * SCORE_PER_EXTRA_BUYER);
+  // Bonus if any triggering wallet is a known gang wallet (higher certainty)
+  if (s.knownGangBuyers.size > 0) score += SCORE_KNOWN_GANG;
   if (s.detectionMc < 5_000) score += SCORE_VERY_EARLY;
   else if (s.detectionMc < 12_000) score += SCORE_EARLY;
   return Math.min(100, score);
@@ -102,8 +102,9 @@ function toPublic(s: Suspect): BundleSuspect {
     detectedAt: new Date(s.detectedAt).toISOString(),
     detectionMc: Math.round(s.detectionMc),
     currentMc: Math.round(s.currentMc),
-    gangWallets: [...s.qualifyingWallets], // show only the qualifying (≥7 SOL) ones
-    gangWalletCount: s.qualifyingWallets.size,
+    gangWallets: [...s.whaleBuyers],
+    gangWalletCount: s.whaleBuyers.size,
+    knownGangCount: s.knownGangBuyers.size,
     totalBuys: s.totalBuys,
     totalSells: s.totalSells,
     buyToSellRatio: +bs.toFixed(2),
@@ -113,24 +114,22 @@ function toPublic(s: Suspect): BundleSuspect {
 }
 
 export class BundleTracker {
+  /** Known gang wallets — used for scoring bonus only, NOT as an entry gate. */
   private readonly gangWallets: Set<string>;
   private readonly suspects = new Map<string, Suspect>();
   private totalDetected = 0;
   private onNewSuspect?: (s: BundleSuspect) => void;
 
-  /** Register a callback fired each time a new qualifying suspect is first detected. */
   setOnNewSuspect(cb: (s: BundleSuspect) => void): void { this.onNewSuspect = cb; }
 
   constructor() {
-    // Load the gang wallet list from the committed JSON file.
-    // Falls back gracefully to the seed list if the file is missing.
     const jsonPath = path.join(__dirname, "gangWallets.json");
     try {
       const raw = fs.readFileSync(jsonPath, "utf8");
       this.gangWallets = new Set(JSON.parse(raw) as string[]);
-      console.log(`[BundleTracker] loaded ${this.gangWallets.size} gang wallets`);
+      console.log(`[BundleTracker] loaded ${this.gangWallets.size} known gang wallets (scoring bonus only)`);
     } catch {
-      console.warn("[BundleTracker] gangWallets.json not found — using seed list only");
+      console.warn("[BundleTracker] gangWallets.json not found");
       this.gangWallets = new Set(SEED_WALLETS);
     }
   }
@@ -139,31 +138,30 @@ export class BundleTracker {
   onTrade(event: CanonicalEvent): void {
     if (event.type !== "trade" || event.side !== "buy") return;
     if (!event.mint || !event.wallet) return;
-    const mc = event.marketCap || 0;
+    const mc  = event.marketCap || 0;
     const sol = event.amountSol || 0;
-    const isGangWallet = this.gangWallets.has(event.wallet);
-    const isQualifyingBuy = isGangWallet && sol >= MIN_TRIGGER_SOL;
+    const isKnownGang    = this.gangWallets.has(event.wallet);
+    const isWhaleBuy     = sol >= MIN_TRIGGER_SOL && (mc < PRE_BUNDLE_MC || mc === 0);
 
-    // Update existing suspects on every trade (any buyer)
+    // Update existing suspect on every subsequent buy
     const existing = this.suspects.get(event.mint);
     if (existing) {
       if (mc > 0) existing.currentMc = mc;
       existing.totalBuys++;
       if (sol > existing.largestBuySol) existing.largestBuySol = sol;
-      if (isGangWallet) existing.gangWallets.add(event.wallet);
-      if (isQualifyingBuy) {
-        const prevSize = existing.qualifyingWallets.size;
-        existing.qualifyingWallets.add(event.wallet);
-        if (existing.qualifyingWallets.size > prevSize) {
-          console.log(`[BundleTracker] ${event.mint.slice(0, 8)}… +qualifying wallet → ${existing.qualifyingWallets.size} (score=${calcScore(existing)})`);
+      if (isWhaleBuy) {
+        const prev = existing.whaleBuyers.size;
+        existing.whaleBuyers.add(event.wallet);
+        if (isKnownGang) existing.knownGangBuyers.add(event.wallet);
+        if (existing.whaleBuyers.size > prev) {
+          console.log(`[BundleTracker] ${event.mint.slice(0, 8)}… +whale buyer → ${existing.whaleBuyers.size}${isKnownGang ? " [KNOWN GANG]" : ""} score=${calcScore(existing)}`);
         }
       }
       return;
     }
 
-    // Only create a new suspect on a qualifying gang buy (≥7 SOL from gang wallet pre-25k)
-    if (!isQualifyingBuy) return;
-    if (mc >= PRE_BUNDLE_MC) return; // already in bundle phase
+    // Create a new suspect on the FIRST ≥7 SOL buy from ANY wallet before 18k MC
+    if (!isWhaleBuy) return;
 
     const newSuspect: Suspect = {
       mint: event.mint,
@@ -171,16 +169,16 @@ export class BundleTracker {
       detectedAt: Date.now(),
       detectionMc: mc,
       currentMc: mc,
-      gangWallets: new Set([event.wallet]),
-      qualifyingWallets: new Set([event.wallet]),
+      whaleBuyers: new Set([event.wallet]),
+      knownGangBuyers: isKnownGang ? new Set([event.wallet]) : new Set(),
       totalBuys: 1,
       totalSells: 0,
       largestBuySol: sol,
     };
     this.suspects.set(event.mint, newSuspect);
     this.totalDetected++;
-    console.log(`[BundleTracker] NEW suspect ${event.mint.slice(0, 8)}… MC=$${Math.round(mc)} sol=${sol.toFixed(2)} score=60`);
-    // Notify the bundle live trader so it can enter immediately
+    const gangTag = isKnownGang ? " [KNOWN GANG ✓]" : "";
+    console.log(`[BundleTracker] NEW ${event.mint.slice(0, 8)}… MC=$${Math.round(mc)} sol=${sol.toFixed(2)}${gangTag}`);
     if (this.onNewSuspect) this.onNewSuspect(toPublic(newSuspect));
   }
 

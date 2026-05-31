@@ -1613,8 +1613,13 @@ function BundleSniperPanel({ bundle, bundleLive, onBundleLiveControl }: {
                 <div><span className="dim">MC now </span><span style={{ color: "var(--fg)" }}>${fmtMC(s.currentMc)}</span></div>
                 <div><span className="dim">detected </span><span style={{ color: "var(--fg)" }}>${fmtMC(s.detectionMc)}</span></div>
                 <div>
-                  <span className="dim">gang wallets </span>
+                  <span className="dim">whale buyers </span>
                   <span style={{ color: s.gangWalletCount >= 2 ? "var(--up)" : "var(--fg)" }}>{s.gangWalletCount}</span>
+                  {s.knownGangCount > 0 && (
+                    <span style={{ marginLeft: 4, fontSize: 9, color: "#f59e0b", fontWeight: 700 }}>
+                      {s.knownGangCount} GANG
+                    </span>
+                  )}
                 </div>
                 <div>
                   <span className="dim">largest buy </span>
@@ -1625,15 +1630,18 @@ function BundleSniperPanel({ bundle, bundleLive, onBundleLiveControl }: {
 
               {s.gangWallets.length > 0 && (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 3, marginTop: 5 }}>
-                  {s.gangWallets.slice(0, 3).map((w) => (
-                    <span key={w} style={{
-                      fontSize: 9, fontFamily: "monospace",
-                      background: "rgba(16,185,129,0.12)", color: "var(--up)",
-                      padding: "1px 4px", borderRadius: 3, border: "1px solid rgba(16,185,129,0.3)",
-                    }}>
-                      {w.slice(0, 6)}…{w.slice(-4)}
-                    </span>
-                  ))}
+                  {s.gangWallets.slice(0, 3).map((w) => {
+                    const isGang = s.knownGangCount > 0; // simplified — full check would need per-wallet data
+                    return (
+                      <span key={w} style={{
+                        fontSize: 9, fontFamily: "monospace",
+                        background: "rgba(16,185,129,0.12)", color: "var(--up)",
+                        padding: "1px 4px", borderRadius: 3, border: "1px solid rgba(16,185,129,0.3)",
+                      }}>
+                        {w.slice(0, 6)}…{w.slice(-4)}
+                      </span>
+                    );
+                  })}
                   {s.gangWallets.length > 3 && (
                     <span style={{ fontSize: 9, color: "var(--text-3)" }}>+{s.gangWallets.length - 3} more</span>
                   )}
