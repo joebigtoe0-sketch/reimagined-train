@@ -37,6 +37,12 @@ export interface TradeInfo {
   marketCap: number;
   signature: string;
   timestamp: string;
+  /**
+   * True only when this trade was discovered via the post-create RPC retrocheck
+   * (balance-diff on getTransaction). These are guaranteed same-block Jito bundle
+   * buys that arrived before our subscribeTokenTrade subscription was set up.
+   */
+  isJitoBundle?: boolean;
 }
 
 /** A bonding-curve graduation (token migrated to a DEX/AMM). */

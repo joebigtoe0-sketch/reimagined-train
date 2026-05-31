@@ -96,6 +96,8 @@ export interface CanonicalEvent {
   participants?: string[];
   mints?: string[];
   devWallet?: string;
+  /** True if this trade was confirmed on-chain as a same-block Jito bundle buy. */
+  isJitoBundle?: boolean;
   metadata?: Record<string, string | number | boolean>;
 }
 

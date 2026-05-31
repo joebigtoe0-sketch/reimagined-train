@@ -1,18 +1,18 @@
 /**
- * BundleTracker — real-time monitor for the "slow-crawl → bundle-pump → migrate" pattern.
+ * BundleTracker — real-time monitor for the "Jito bundle-pump → migrate" pattern.
  *
- * Detection gate (behavioral — no wallet list required):
- *   Non-dev wallet buys ≥7 SOL before 18k MC AND within 1s of token creation.
- *   Targets Jito same-block bundles only — gang buys confirmed at +71–200ms.
- *   1–9s delay = -8.5% avg PnL (noise). 0s delay other wallet = +77.5% avg PnL.
+ * Detection gate:
+ *   A non-dev wallet buys ≥7 SOL in the SAME BLOCK as the token's creation
+ *   (confirmed by the RPC retrocheck in pumpPortalAdapter — isJitoBundle=true).
+ *   MC must be below 18k at trigger time.
  *
- * Backtest (44.6M trades, 30 days):
- *   17,316 triggers/month  |  22.4% reach migration  |  3.9× better than random
- *   Pure trailing stop: avg +7.4% P&L, 31.1% win rate
+ * This is the highest-quality signal: same-block Jito bundles average +77.5% PnL.
+ * Time-window filtering is NOT done here — the retrocheck already guarantees the
+ * trade is from the creation block (blockTime match), so there is no age gate.
  *
  * Scoring 0–100:
- *   60  — base: first ≥7 SOL buy (any wallet)
- *   +15 — per additional ≥7 SOL buyer (cap 90)
+ *   60  — base: first confirmed Jito buy
+ *   +15 — per additional Jito buyer in same block (cap 90)
  *   +10 — bonus if ANY triggering wallet is a known gang wallet (higher certainty)
  *   +10 — very early detection (MC < 5k)
  *   +5  — early detection (MC < 12k)
@@ -32,14 +32,8 @@ const SUSPECT_TTL_MS  = 60 * 60_000;
 // Suspects past this MC are expired (already migrating / failed)
 const EXPIRE_MC       = 40_000;
 
-// Behavioral gate — from splitexit.mjs / behaviorgate.mjs validation:
-// ANY wallet buying ≥7 SOL before 18k MC → 22.4% reach migration (3.9× baseline)
+// Minimum SOL a single buy must be to count as a Jito bundle signal
 const MIN_TRIGGER_SOL = 7;
-// Only trigger if the whale buy happens within this window of token creation.
-// Real bundle gangs buy in the same block or within seconds of deployment.
-// Only fire on Jito same-block buys. Logs confirm gang buys arrive at +71–200ms;
-// anything beyond ~1s is not a same-block bundle (backtest: 1–9s = -8.5% avg PnL).
-const TOKEN_AGE_LIMIT_MS = 1_000; // 1 second
 
 // ─── scoring ──────────────────────────────────────────────────────────────────
 const SCORE_BASE_TRIGGER   = 60;  // first ≥7 SOL buy (any wallet)
@@ -127,8 +121,6 @@ export class BundleTracker {
   /** Known gang wallets — used for scoring bonus only, NOT as an entry gate. */
   private readonly gangWallets: Set<string> = new Set();
   private readonly suspects = new Map<string, Suspect>();
-  /** Creation timestamp for each mint — gated so we only trigger on early buys. */
-  private readonly tokenBornAt = new Map<string, number>();
   private totalDetected = 0;
   private onNewSuspect?: (s: BundleSuspect) => void;
 
@@ -157,42 +149,26 @@ export class BundleTracker {
     }
   }
 
-  /** Called on every launch event so we know the token's creation time. */
-  onLaunch(event: CanonicalEvent): void {
-    if (!event.mint) return;
-    const bornAt = event.timestamp ? new Date(event.timestamp).getTime() : Date.now();
-    if (!this.tokenBornAt.has(event.mint)) {
-      this.tokenBornAt.set(event.mint, bornAt);
-    }
-    // NOTE: event.wallet here is the DEV wallet (creator). We intentionally do
-    // NOT trigger on the dev's initial buy — we need a DIFFERENT wallet buying
-    // ≥7 SOL. That signal comes through onTrade() via subscribeTokenTrade.
-  }
+  /** Called on every launch event — no-op now that we don't need age tracking. */
+  onLaunch(_event: CanonicalEvent): void { /* intentionally empty */ }
 
   /** Called on every trade event from the runtime engine. */
   onTrade(event: CanonicalEvent): void {
     if (event.type !== "trade" || event.side !== "buy") return;
     if (!event.mint || !event.wallet) return;
+
+    // Only act on trades that were confirmed on-chain as same-block Jito buys.
+    // These are injected by pumpPortalAdapter's RPC retrocheck with isJitoBundle=true.
+    if (!event.isJitoBundle) return;
+
     const mc  = event.marketCap || 0;
     const sol = event.amountSol || 0;
 
-    // Derive trade timestamp; fall back to now
-    const tradeTime  = event.timestamp ? new Date(event.timestamp).getTime() : Date.now();
-    // Record birth time on first trade if we don't have it from a launch event
-    if (!this.tokenBornAt.has(event.mint)) {
-      this.tokenBornAt.set(event.mint, tradeTime);
-    }
-    const bornAt     = this.tokenBornAt.get(event.mint)!;
-    const tokenAgeMs = tradeTime - bornAt;
-
-    // Skip dev self-buy — backtest shows dev-triggered = +7.5% avg vs +77.5% for others
+    // Skip dev self-buy
     if (event.devWallet && event.wallet === event.devWallet) return;
 
-    const isKnownGang    = this.gangWallets.has(event.wallet);
-    // Whale buy must be early — gang loads within first 10s of launch
-    const isWhaleBuy     = sol >= MIN_TRIGGER_SOL
-      && (mc < PRE_BUNDLE_MC || mc === 0)
-      && tokenAgeMs < TOKEN_AGE_LIMIT_MS;
+    const isKnownGang = this.gangWallets.has(event.wallet);
+    const isWhaleBuy  = sol >= MIN_TRIGGER_SOL && (mc < PRE_BUNDLE_MC || mc === 0);
 
     // Update existing suspect on every subsequent buy
     const existing = this.suspects.get(event.mint);
@@ -242,13 +218,6 @@ export class BundleTracker {
 
   /** Called on every token state update — syncs symbol + MC, expires old suspects. */
   onToken(token: TokenState): void {
-    // Capture birth time from createdAt — covers the case where the launch event
-    // arrived after the first trade (out-of-order delivery from PumpPortal).
-    if (token.createdAt && !this.tokenBornAt.has(token.mint)) {
-      const t = new Date(token.createdAt).getTime();
-      if (!isNaN(t)) this.tokenBornAt.set(token.mint, t);
-    }
-
     const s = this.suspects.get(token.mint);
     if (!s) return;
     if (token.symbol) s.symbol = token.symbol;
@@ -281,12 +250,6 @@ export class BundleTracker {
     for (const [mint, s] of this.suspects) {
       if (now - s.detectedAt > SUSPECT_TTL_MS || s.currentMc > EXPIRE_MC) {
         this.suspects.delete(mint);
-      }
-    }
-    // Evict tokenBornAt entries older than 2× TTL (they won't trigger anything new)
-    for (const [mint, bornAt] of this.tokenBornAt) {
-      if (now - bornAt > SUSPECT_TTL_MS * 2) {
-        this.tokenBornAt.delete(mint);
       }
     }
   }

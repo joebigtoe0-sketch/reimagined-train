@@ -470,6 +470,7 @@ export class PumpPortalAdapter implements IngestionSource {
           marketCap:    0,
           signature:    sigInfo.signature,
           timestamp:    blockTs,
+          isJitoBundle: true,
         });
 
         console.log(

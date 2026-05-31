@@ -463,7 +463,8 @@ export class RuntimeEngine {
         tokenAmount: t.tokenAmount,
         marketCap: t.marketCap,
         side: t.side,
-        participants: t.traderWallet ? [t.traderWallet] : []
+        participants: t.traderWallet ? [t.traderWallet] : [],
+        isJitoBundle: t.isJitoBundle,
       }));
       if (tradeEvents.length > 0) await this.queueAdapter.publish(tradeEvents);
     }
