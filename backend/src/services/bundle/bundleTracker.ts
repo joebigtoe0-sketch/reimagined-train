@@ -2,9 +2,9 @@
  * BundleTracker — real-time monitor for the "slow-crawl → bundle-pump → migrate" pattern.
  *
  * Detection gate (behavioral — no wallet list required):
- *   ANY wallet that buys ≥7 SOL before 18k MC AND within 10s of token creation.
- *   Real bundle gangs buy in the same block or within seconds of deployment.
- *   Anything later is a random whale buying an already-running token.
+ *   Non-dev wallet buys ≥7 SOL before 18k MC AND within 1s of token creation.
+ *   Targets Jito same-block bundles only — gang buys confirmed at +71–200ms.
+ *   1–9s delay = -8.5% avg PnL (noise). 0s delay other wallet = +77.5% avg PnL.
  *
  * Backtest (44.6M trades, 30 days):
  *   17,316 triggers/month  |  22.4% reach migration  |  3.9× better than random
@@ -37,7 +37,9 @@ const EXPIRE_MC       = 40_000;
 const MIN_TRIGGER_SOL = 7;
 // Only trigger if the whale buy happens within this window of token creation.
 // Real bundle gangs buy in the same block or within seconds of deployment.
-const TOKEN_AGE_LIMIT_MS = 10_000; // 10 seconds (backtest: +12.5% avg P&L vs no gate)
+// Only fire on Jito same-block buys. Logs confirm gang buys arrive at +71–200ms;
+// anything beyond ~1s is not a same-block bundle (backtest: 1–9s = -8.5% avg PnL).
+const TOKEN_AGE_LIMIT_MS = 1_000; // 1 second
 
 // ─── scoring ──────────────────────────────────────────────────────────────────
 const SCORE_BASE_TRIGGER   = 60;  // first ≥7 SOL buy (any wallet)
