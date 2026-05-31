@@ -21,6 +21,11 @@ const BET_SIZE = env.BUNDLE_BET_SIZE ?? 0.4;
 const MAX_OPEN = 5;                   // max simultaneous bundle positions
 const TRAIL_FRAC = 0.25;             // exit when MC drops 25% from peak
 const HARD_STOP_FRAC = 0.70;        // hard stop at -30% from entry
+// Migration exit: sell before the gang can dump on Raydium.
+// pump.fun migration threshold moves with SOL price. At $82/SOL it's ~$34k.
+// We exit slightly below that to guarantee a fill inside the bonding curve.
+// Adjust BUNDLE_MIGRATION_MC in env if SOL price changes significantly.
+const MIGRATION_EXIT_MC = env.BUNDLE_MIGRATION_MC ?? 30_000;
 const MAX_SELL_ATTEMPTS = 5;
 const SELL_BACKOFF_BASE_MS = 8_000;
 
@@ -186,9 +191,12 @@ export class BundleLiveTrader {
     if (pos.currentMc > pos.peakMc) pos.peakMc = pos.currentMc;
 
     let reason: string | null = null;
+    // Migration exit: sell before token migrates to Raydium (where gang will dump).
+    // This is the primary profit-taking exit for bundle-pump tokens.
+    if (pos.currentMc >= MIGRATION_EXIT_MC) reason = "migration";
     // Hard stop: -30% from entry
-    if (pos.currentMc <= pos.entryMc * HARD_STOP_FRAC) reason = "stop";
-    // Trailing stop: 25% off peak
+    else if (pos.currentMc <= pos.entryMc * HARD_STOP_FRAC) reason = "stop";
+    // Trailing stop: 25% off peak (catches reversals mid-bonding-curve)
     else if (pos.peakMc > pos.entryMc && pos.currentMc <= pos.peakMc * (1 - TRAIL_FRAC)) reason = "trail";
     else if (dead) reason = "dead";
 

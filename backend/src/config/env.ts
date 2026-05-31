@@ -60,6 +60,10 @@ const envSchema = z.object({
   // Bundle Sniper live trader — separate from the playbook live bot.
   // Bet size in SOL per bundle-sniper trade (default 0.4).
   BUNDLE_BET_SIZE: z.coerce.number().default(0.4),
+  // MC threshold (USD) at which we exit before token migrates to Raydium.
+  // pump.fun migration is ~$34k at SOL=$82. We exit slightly below to guarantee
+  // a bonding-curve fill. Raise this env var proportionally if SOL price rises.
+  BUNDLE_MIGRATION_MC: z.coerce.number().default(30_000),
 });
 
 export const env = envSchema.parse(process.env);
