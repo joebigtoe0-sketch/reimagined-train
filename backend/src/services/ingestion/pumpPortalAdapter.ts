@@ -52,6 +52,9 @@ export class PumpPortalAdapter implements IngestionSource {
   private tradeBuffer: TradeInfo[] = [];
   private migrationBuffer: MigrationInfo[] = [];
   private subscribedMints = new Set<string>();
+  // Mints we auto-subscribed on create — tracked separately so we can
+  // unsubscribe them after EARLY_UNSUB_MS if the engine doesn't promote them.
+  private earlySubMints = new Map<string, number>(); // mint → subscribedAt
   private seenMints = new Set<string>();
   private seenTradeSigs = new Set<string>();
   private seenMigrations = new Set<string>();
@@ -93,6 +96,14 @@ export class PumpPortalAdapter implements IngestionSource {
       // `migrated` label (free, no key required).
       this.send({ method: "subscribeMigration" });
       // Re-subscribe to any mints we were tracking before a reconnect.
+      // earlySubMints get stale fast — prune them on reconnect to avoid re-paying.
+      const reconnectNow = Date.now();
+      for (const [mint, subAt] of this.earlySubMints) {
+        if (reconnectNow - subAt > 25_000) {
+          this.earlySubMints.delete(mint);
+          this.subscribedMints.delete(mint);
+        }
+      }
       if (this.subscribedMints.size > 0 && env.PUMPPORTAL_API_KEY) {
         this.send({ method: "subscribeTokenTrade", keys: [...this.subscribedMints] });
       }
@@ -209,6 +220,15 @@ export class PumpPortalAdapter implements IngestionSource {
         telegram: msg.telegram?.trim() || undefined,
       });
       this.capSet(this.seenMints, 50_000, 25_000);
+
+      // IMMEDIATELY subscribe to this token's trade feed so we catch the whale
+      // buy that may land in the same block (400ms later). Waiting for the next
+      // ingest tick (up to 1200ms) would cause us to miss it entirely.
+      if (env.PUMPPORTAL_API_KEY && !this.subscribedMints.has(msg.mint)) {
+        this.subscribedMints.add(msg.mint);
+        this.earlySubMints.set(msg.mint, Date.now());
+        this.send({ method: "subscribeTokenTrade", keys: [msg.mint] });
+      }
       return;
     }
 
@@ -260,12 +280,28 @@ export class PumpPortalAdapter implements IngestionSource {
     // don't keep paying for trades on dead tokens.
     if (env.PUMPPORTAL_API_KEY) {
       const desired = new Set(trackedMints);
+      const now = Date.now();
+
+      // Prune early-subscribed mints that the engine didn't promote to its
+      // tracked set after EARLY_UNSUB_MS. These are tokens where no bundle buy
+      // was detected — no reason to keep paying for their trades.
+      const EARLY_UNSUB_MS = 25_000;
+      for (const [mint, subAt] of this.earlySubMints) {
+        if (now - subAt > EARLY_UNSUB_MS && !desired.has(mint)) {
+          this.earlySubMints.delete(mint);
+          this.subscribedMints.delete(mint);
+          this.send({ method: "unsubscribeTokenTrade", keys: [mint] });
+        }
+      }
+
       const fresh = trackedMints.filter((m) => !this.subscribedMints.has(m));
       if (fresh.length > 0) {
         for (const m of fresh) this.subscribedMints.add(m);
         this.send({ method: "subscribeTokenTrade", keys: fresh });
       }
-      const stale = [...this.subscribedMints].filter((m) => !desired.has(m));
+      const stale = [...this.subscribedMints].filter(
+        (m) => !desired.has(m) && !this.earlySubMints.has(m)
+      );
       if (stale.length > 0) {
         for (const m of stale) this.subscribedMints.delete(m);
         this.send({ method: "unsubscribeTokenTrade", keys: stale });
