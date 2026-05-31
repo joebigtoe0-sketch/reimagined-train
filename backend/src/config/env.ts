@@ -56,7 +56,10 @@ const envSchema = z.object({
   // Priority fee in SOL per tx (added to each buy/sell to improve landing rate).
   LIVE_PRIORITY_FEE: z.coerce.number().default(0.0005),
   // Slippage tolerance % for PumpPortal trade-local.
-  LIVE_SLIPPAGE: z.coerce.number().default(15)
+  LIVE_SLIPPAGE: z.coerce.number().default(15),
+  // Bundle Sniper live trader — separate from the playbook live bot.
+  // Bet size in SOL per bundle-sniper trade (default 0.4).
+  BUNDLE_BET_SIZE: z.coerce.number().default(0.4),
 });
 
 export const env = envSchema.parse(process.env);

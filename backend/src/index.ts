@@ -84,6 +84,10 @@ app.post("/api/paper/stop", async () => { engine.stopPaper(); return { paper: en
 app.post("/api/paper/reset", async () => { engine.resetPaper(); return { paper: engine.paperState() }; });
 
 app.get("/api/bundle", async () => ({ bundle: engine.bundleState() }));
+app.get("/api/bundle/live", async () => ({ bundleLive: engine.bundleLiveState() }));
+app.post("/api/bundle/live/arm", async () => { engine.armBundleLive(); return { bundleLive: engine.bundleLiveState() }; });
+app.post("/api/bundle/live/disarm", async () => { engine.disarmBundleLive(); return { bundleLive: engine.bundleLiveState() }; });
+app.post("/api/bundle/live/reset", async () => { engine.resetBundleLive(); return { bundleLive: engine.bundleLiveState() }; });
 
 app.get("/api/live", async () => ({ live: engine.liveState() }));
 app.post("/api/live/arm", async () => { engine.armLive(); return { live: engine.liveState() }; });

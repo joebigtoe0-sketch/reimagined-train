@@ -29,6 +29,8 @@ import { LiveTrader } from "../services/live/liveTrader.js";
 import { PlaybookStrategy } from "../services/intelligence/playbookStrategy.js";
 import { BundleTracker } from "../services/bundle/bundleTracker.js";
 import type { BundleState } from "../services/bundle/bundleTracker.js";
+import { BundleLiveTrader } from "../services/bundle/bundleLiveTrader.js";
+import type { BundleLiveState } from "../services/bundle/bundleLiveTrader.js";
 import { RuntimeState } from "../state/runtimeState.js";
 import type { CanonicalEvent, ProbabilityRecord, TokenState } from "../types.js";
 
@@ -93,6 +95,7 @@ export class RuntimeEngine {
   private readonly live = new LiveTrader();
   private readonly playbook = new PlaybookStrategy();
   private readonly bundle = new BundleTracker();
+  private readonly bundleLive = new BundleLiveTrader();
   private calibration: CalibrationReport = { sampleSize: 0, brierScore: 0, precision: 0, recall: 0, driftDelta: 0 };
 
   private lastPaperSaveAt = 0;
@@ -105,6 +108,8 @@ export class RuntimeEngine {
       persistTrade: (t) => void this.repo.insertPaperTrade(t).catch((err) => console.warn("[paper] trade persist failed:", err instanceof Error ? err.message : err)),
       persistState: (s) => void this.repo.savePaperState(s).catch((err) => console.warn("[paper] state persist failed:", err instanceof Error ? err.message : err))
     });
+    // Wire bundle tracker → bundle live trader: any new suspect immediately triggers entry evaluation.
+    this.bundle.setOnNewSuspect((s) => this.bundleLive.onSuspect(s));
   }
 
   /** Restore a previously persisted paper run on boot (after migrations). */
@@ -163,10 +168,12 @@ export class RuntimeEngine {
         this.paper.onToken(token);
         this.live.onToken(token);
         this.bundle.onToken(token);
+        this.bundleLive.onToken(token);
       }
       onBroadcast("paperUpdate", this.paper.state());
       onBroadcast("liveUpdate", this.live.state());
       onBroadcast("bundleUpdate", this.bundle.state());
+      onBroadcast("bundleLiveUpdate", this.bundleLive.state());
       // Periodically checkpoint open positions marked-to-market so a restart
       // resumes with fresh values (closes/entries already persist immediately).
       const now = Date.now();
@@ -184,6 +191,11 @@ export class RuntimeEngine {
   liveState() { return this.live.state(); }
   paperState() { return this.paper.state(); }
   bundleState(): BundleState { return this.bundle.state(); }
+
+  armBundleLive(): void { this.bundleLive.arm(); }
+  disarmBundleLive(): void { this.bundleLive.disarm(); }
+  resetBundleLive(): void { this.bundleLive.reset(); }
+  bundleLiveState(): BundleLiveState { return this.bundleLive.state(); }
 
   private async refreshAlphaWallets(): Promise<void> {
     try {

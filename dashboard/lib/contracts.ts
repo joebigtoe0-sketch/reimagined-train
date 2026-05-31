@@ -159,6 +159,49 @@ export type BundleState = {
   totalDetected: number;
 };
 
+export type BundleLivePosition = {
+  mint: string;
+  symbol: string;
+  entryMc: number;
+  currentMc: number;
+  peakMc: number;
+  solIn: number;
+  value: number;
+  pnlPct: number;
+  entryAt: string;
+  txBuy?: string;
+};
+
+export type BundleLiveTrade = {
+  mint: string;
+  symbol: string;
+  solIn: number;
+  solOut: number;
+  pnl: number;
+  pnlPct: number;
+  entryMc: number;
+  exitMc: number;
+  reason: string;
+  entryAt: string;
+  exitAt: string;
+  txBuy?: string;
+  txSell?: string;
+};
+
+export type BundleLiveState = {
+  available: boolean;
+  armed: boolean;
+  betSize: number;
+  openCount: number;
+  tradeCount: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  dailyPnl: number;
+  positions: BundleLivePosition[];
+  trades: BundleLiveTrade[];
+};
+
 export type DeveloperStat = {
   devWallet: string;
   tokens: number;

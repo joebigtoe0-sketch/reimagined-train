@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, CSSProperties } from "react";
-import type { AlertEvent, AlertRule, BundleState, BundleSuspect, DeveloperStat, LiveState, PaperLifetime, PaperState, PaperTrade, TokenState, WalletProfile } from "../lib/contracts";
+import type { AlertEvent, AlertRule, BundleLiveState, BundleState, BundleSuspect, DeveloperStat, LiveState, PaperLifetime, PaperState, PaperTrade, TokenState, WalletProfile } from "../lib/contracts";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8080";
 const WS_BASE = API_BASE.startsWith("https://")
@@ -249,11 +249,13 @@ function actionStyle(a?: string): React.CSSProperties {
   }
 }
 
-function TerminalView({ tokens, search, onSelectToken, paper, onPaperControl, live, onLiveControl, bundle }: {
+function TerminalView({ tokens, search, onSelectToken, paper, onPaperControl, live, onLiveControl, bundle, bundleLive, onBundleLiveControl }: {
   tokens: TokenState[]; search: string; onSelectToken: (t: TokenState) => void;
   paper: PaperState | null; onPaperControl: (action: "start" | "stop" | "reset") => void;
   live: LiveState | null; onLiveControl: (action: "arm" | "disarm" | "reset") => void;
   bundle: BundleState | null;
+  bundleLive: BundleLiveState | null;
+  onBundleLiveControl: (action: "arm" | "disarm" | "reset") => void;
 }): ReactElement {
   const [sortKey, setSortKey] = useState<SortKey>("createdAt");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
@@ -454,7 +456,7 @@ function TerminalView({ tokens, search, onSelectToken, paper, onPaperControl, li
         </div>
         <PaperBotPanel paper={paper} onControl={onPaperControl} onSelectToken={onSelectToken} tokens={tokens} />
         <LiveBotPanel live={live} onControl={onLiveControl} onSelectToken={onSelectToken} tokens={tokens} />
-        <BundleSniperPanel bundle={bundle} />
+        <BundleSniperPanel bundle={bundle} bundleLive={bundleLive} onBundleLiveControl={onBundleLiveControl} />
       </div>
     </div>
   );
@@ -1439,15 +1441,23 @@ function DevsView({ developers, search, onSelectToken, tokens }: {
 }
 
 // ─── BUNDLE SNIPER PANEL ─────────────────────────────────────────────────────
-function BundleSniperPanel({ bundle }: { bundle: BundleState | null }): ReactElement {
+function BundleSniperPanel({ bundle, bundleLive, onBundleLiveControl }: {
+  bundle: BundleState | null;
+  bundleLive: BundleLiveState | null;
+  onBundleLiveControl: (action: "arm" | "disarm" | "reset") => void;
+}): ReactElement {
   const suspects = bundle?.suspects ?? [];
   const gangCount = bundle?.gangWalletCount ?? 0;
   const totalDetected = bundle?.totalDetected ?? 0;
+  const bl = bundleLive;
 
   const scoreColor = (s: number) =>
     s >= 80 ? "var(--up)" : s >= 50 ? "#f59e0b" : "var(--text-2)";
-
+  const pnlColor = (v: number) => v > 0 ? "var(--up)" : v < 0 ? "var(--dn)" : "var(--text-2)";
   const pumpUrl = (mint: string) => `https://pump.fun/coin/${mint}`;
+
+  const armed = bl?.armed ?? false;
+  const available = bl?.available ?? false;
 
   return (
     <div className="panel" style={{ flex: "0 0 auto" }}>
@@ -1457,6 +1467,116 @@ function BundleSniperPanel({ bundle }: { bundle: BundleState | null }): ReactEle
           {gangCount.toLocaleString()} wallets · {totalDetected} detected
         </span>
       </div>
+
+      {/* ── LIVE BOT CONTROL STRIP ──────────────────────────── */}
+      <div style={{
+        padding: "8px 10px",
+        borderBottom: "1px solid var(--border)",
+        background: armed ? "rgba(16,185,129,0.07)" : "rgba(255,255,255,0.02)",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+          {/* status pill */}
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <div style={{
+              width: 7, height: 7, borderRadius: "50%",
+              background: armed ? "var(--up)" : available ? "#888" : "#555",
+              boxShadow: armed ? "0 0 6px var(--up)" : "none",
+              flexShrink: 0,
+            }} />
+            <span style={{ fontSize: 11, fontWeight: 600, color: armed ? "var(--up)" : "var(--text-2)" }}>
+              {!available ? "NO WALLET" : armed ? "LIVE — ARMED" : "STANDBY"}
+            </span>
+            {bl && (
+              <span className="dim" style={{ fontSize: 10 }}>
+                {bl.betSize}◎/trade · {bl.openCount} open
+              </span>
+            )}
+          </div>
+          {/* control buttons */}
+          <div style={{ display: "flex", gap: 4 }}>
+            {!armed ? (
+              <button
+                onClick={() => onBundleLiveControl("arm")}
+                disabled={!available}
+                style={{
+                  background: available ? "var(--up)" : "#333",
+                  color: available ? "#000" : "#666",
+                  border: "none", borderRadius: 4,
+                  padding: "3px 10px", fontSize: 11, fontWeight: 700, cursor: available ? "pointer" : "default",
+                }}
+              >
+                ▶ START
+              </button>
+            ) : (
+              <button
+                onClick={() => onBundleLiveControl("disarm")}
+                style={{
+                  background: "var(--dn)", color: "#fff", border: "none", borderRadius: 4,
+                  padding: "3px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer",
+                }}
+              >
+                ■ STOP
+              </button>
+            )}
+            <button
+              onClick={() => { if (confirm("Reset bundle sniper stats?")) onBundleLiveControl("reset"); }}
+              style={{
+                background: "rgba(255,255,255,0.08)", color: "var(--text-2)", border: "1px solid var(--border)",
+                borderRadius: 4, padding: "3px 8px", fontSize: 10, cursor: "pointer",
+              }}
+            >
+              RST
+            </button>
+          </div>
+        </div>
+
+        {/* P&L summary row */}
+        {bl && bl.tradeCount > 0 && (
+          <div style={{ display: "flex", gap: 14, marginTop: 6, fontSize: 10 }}>
+            <div><span className="dim">trades </span><span style={{ color: "var(--fg)" }}>{bl.tradeCount}</span></div>
+            <div><span className="dim">W/L </span><span style={{ color: "var(--up)" }}>{bl.wins}</span><span className="dim">/</span><span style={{ color: "var(--dn)" }}>{bl.losses}</span></div>
+            <div><span className="dim">win% </span><span style={{ color: bl.winRate >= 50 ? "var(--up)" : "var(--dn)" }}>{bl.winRate.toFixed(0)}%</span></div>
+            <div><span className="dim">daily pnl </span><span style={{ color: pnlColor(bl.dailyPnl) }}>{bl.dailyPnl > 0 ? "+" : ""}{bl.dailyPnl.toFixed(3)}◎</span></div>
+          </div>
+        )}
+
+        {/* Open positions */}
+        {bl && bl.positions.length > 0 && (
+          <div style={{ marginTop: 6 }}>
+            <div className="dim" style={{ fontSize: 9, marginBottom: 2, textTransform: "uppercase", letterSpacing: 1 }}>Open positions</div>
+            {bl.positions.map((p) => (
+              <div key={p.mint} style={{ display: "flex", justifyContent: "space-between", fontSize: 10, padding: "2px 0" }}>
+                <a href={pumpUrl(p.mint)} target="_blank" rel="noreferrer"
+                  style={{ color: "var(--fg)", textDecoration: "none", fontWeight: 600 }}>
+                  ${p.symbol}
+                </a>
+                <span className="dim">MC ${fmtMC(p.currentMc)} / peak ${fmtMC(p.peakMc)}</span>
+                <span style={{ color: pnlColor(p.pnlPct) }}>{p.pnlPct > 0 ? "+" : ""}{p.pnlPct.toFixed(1)}%</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Recent trades */}
+        {bl && bl.trades.length > 0 && (
+          <div style={{ marginTop: 6 }}>
+            <div className="dim" style={{ fontSize: 9, marginBottom: 2, textTransform: "uppercase", letterSpacing: 1 }}>Recent trades</div>
+            {bl.trades.slice(0, 5).map((t, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 10, padding: "2px 0" }}>
+                <a href={pumpUrl(t.mint)} target="_blank" rel="noreferrer"
+                  style={{ color: "var(--fg)", textDecoration: "none", fontWeight: 600 }}>
+                  ${t.symbol}
+                </a>
+                <span className="dim">{t.reason}</span>
+                <span className="dim">${fmtMC(t.entryMc)} → ${fmtMC(t.exitMc)}</span>
+                <span style={{ color: pnlColor(t.pnl) }}>{t.pnl > 0 ? "+" : ""}{t.pnl.toFixed(3)}◎</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ── SUSPECTS LIST ──────────────────────────────────── */}
       <div className="panel-body">
         {suspects.length === 0 ? (
           <div style={{ padding: "12px 10px", fontSize: 11, color: "var(--text-3)" }}>
@@ -1465,88 +1585,51 @@ function BundleSniperPanel({ bundle }: { bundle: BundleState | null }): ReactEle
         ) : (
           suspects.map((s) => (
             <div key={s.mint} style={{ padding: "8px 10px", borderBottom: "1px solid var(--border)" }}>
-              {/* Header row */}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <a
-                    href={pumpUrl(s.mint)}
-                    target="_blank"
-                    rel="noreferrer"
+                  <a href={pumpUrl(s.mint)} target="_blank" rel="noreferrer"
                     style={{ color: "var(--fg)", fontWeight: 600, fontSize: 13, textDecoration: "none" }}
-                    onClick={(e) => e.stopPropagation()}
-                  >
+                    onClick={(e) => e.stopPropagation()}>
                     ${s.symbol}
                   </a>
                   <span className="dim" style={{ fontSize: 10 }}>{fmtAge(s.detectedAt)} ago</span>
                 </div>
-                {/* Score badge */}
                 <div style={{
-                  background: scoreColor(s.score),
-                  color: "#000",
-                  fontWeight: 700,
-                  fontSize: 11,
-                  padding: "2px 7px",
-                  borderRadius: 4,
-                  minWidth: 36,
-                  textAlign: "center",
+                  background: scoreColor(s.score), color: "#000",
+                  fontWeight: 700, fontSize: 11, padding: "2px 7px", borderRadius: 4, minWidth: 36, textAlign: "center",
                 }}>
                   {s.score}%
                 </div>
               </div>
 
-              {/* Score bar */}
               <div style={{ height: 3, background: "var(--border)", borderRadius: 2, marginBottom: 6, overflow: "hidden" }}>
                 <div style={{
-                  height: "100%",
-                  width: `${s.score}%`,
-                  background: scoreColor(s.score),
-                  borderRadius: 2,
-                  transition: "width 0.4s ease",
+                  height: "100%", width: `${s.score}%`,
+                  background: scoreColor(s.score), borderRadius: 2, transition: "width 0.4s ease",
                 }} />
               </div>
 
-              {/* Stats grid */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "2px 0", fontSize: 10 }}>
-                <div>
-                  <span className="dim">MC now </span>
-                  <span style={{ color: "var(--fg)" }}>${fmtMC(s.currentMc)}</span>
-                </div>
-                <div>
-                  <span className="dim">detected </span>
-                  <span style={{ color: "var(--fg)" }}>${fmtMC(s.detectionMc)}</span>
-                </div>
+                <div><span className="dim">MC now </span><span style={{ color: "var(--fg)" }}>${fmtMC(s.currentMc)}</span></div>
+                <div><span className="dim">detected </span><span style={{ color: "var(--fg)" }}>${fmtMC(s.detectionMc)}</span></div>
                 <div>
                   <span className="dim">gang wallets </span>
-                  <span style={{ color: s.gangWalletCount >= 2 ? "var(--up)" : "var(--fg)" }}>
-                    {s.gangWalletCount}
-                  </span>
-                </div>
-                <div>
-                  <span className="dim">buy/sell </span>
-                  <span style={{ color: s.buyToSellRatio > 8 ? "var(--up)" : "var(--fg)" }}>
-                    {s.buyToSellRatio > 99 ? ">99" : s.buyToSellRatio.toFixed(1)}
-                  </span>
+                  <span style={{ color: s.gangWalletCount >= 2 ? "var(--up)" : "var(--fg)" }}>{s.gangWalletCount}</span>
                 </div>
                 <div>
                   <span className="dim">largest buy </span>
-                  <span style={{ color: s.largestBuySol > 5 ? "var(--up)" : "var(--fg)" }}>
-                    {s.largestBuySol.toFixed(2)}◎
-                  </span>
+                  <span style={{ color: s.largestBuySol >= 7 ? "var(--up)" : "var(--fg)" }}>{s.largestBuySol.toFixed(2)}◎</span>
                 </div>
-                <div>
-                  <span className="dim">buys </span>
-                  <span style={{ color: "var(--fg)" }}>{s.totalBuys}</span>
-                </div>
+                <div><span className="dim">buys </span><span style={{ color: "var(--fg)" }}>{s.totalBuys}</span></div>
               </div>
 
-              {/* Gang wallets pills (first 3) */}
               {s.gangWallets.length > 0 && (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 3, marginTop: 5 }}>
                   {s.gangWallets.slice(0, 3).map((w) => (
                     <span key={w} style={{
                       fontSize: 9, fontFamily: "monospace",
                       background: "rgba(16,185,129,0.12)", color: "var(--up)",
-                      padding: "1px 4px", borderRadius: 3, border: "1px solid rgba(16,185,129,0.3)"
+                      padding: "1px 4px", borderRadius: 3, border: "1px solid rgba(16,185,129,0.3)",
                     }}>
                       {w.slice(0, 6)}…{w.slice(-4)}
                     </span>
@@ -1580,6 +1663,7 @@ export default function Home(): ReactElement {
   const [paper, setPaper] = useState<PaperState | null>(null);
   const [live, setLive] = useState<LiveState | null>(null);
   const [bundle, setBundle] = useState<BundleState | null>(null);
+  const [bundleLive, setBundleLive] = useState<BundleLiveState | null>(null);
   const [selectedToken, setSelectedToken] = useState<TokenState | null>(null);
   const [selectedWallet, setSelectedWallet] = useState<WalletProfile | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -1588,7 +1672,7 @@ export default function Home(): ReactElement {
   useEffect(() => {
     const load = async (): Promise<void> => {
       try {
-        const [tR, aR, ruR, cR, wR, dR, pR, lR, bR] = await Promise.all([
+        const [tR, aR, ruR, cR, wR, dR, pR, lR, bR, blR] = await Promise.all([
           fetch(`${API_BASE}/api/tokens`),
           fetch(`${API_BASE}/api/alerts`),
           fetch(`${API_BASE}/api/alerts/rules`),
@@ -1598,6 +1682,7 @@ export default function Home(): ReactElement {
           fetch(`${API_BASE}/api/paper`),
           fetch(`${API_BASE}/api/live`),
           fetch(`${API_BASE}/api/bundle`),
+          fetch(`${API_BASE}/api/bundle/live`),
         ]);
         const tj = await tR.json() as { tokens?: TokenState[] };
         const aj = await aR.json() as { alerts?: AlertEvent[] };
@@ -1608,6 +1693,7 @@ export default function Home(): ReactElement {
         const pj = await pR.json() as { paper?: PaperState };
         const lj = await lR.json() as { live?: LiveState };
         const bj = await bR.json() as { bundle?: BundleState };
+        const blj = await blR.json() as { bundleLive?: BundleLiveState };
         if (tj.tokens) setTokens(tj.tokens);
         if (aj.alerts) setAlerts(aj.alerts);
         setRules(ruj.rules ?? []);
@@ -1617,6 +1703,7 @@ export default function Home(): ReactElement {
         if (pj.paper) setPaper(pj.paper);
         if (lj.live) setLive(lj.live);
         if (bj.bundle) setBundle(bj.bundle);
+        if (blj.bundleLive) setBundleLive(blj.bundleLive);
       } catch { /* backend may be starting */ }
     };
     void load();
@@ -1650,6 +1737,10 @@ export default function Home(): ReactElement {
           }
           if (msg.type === "bundleUpdate") {
             if (msg.payload) setBundle(msg.payload as unknown as BundleState);
+            return;
+          }
+          if (msg.type === "bundleLiveUpdate") {
+            if (msg.payload) setBundleLive(msg.payload as unknown as BundleLiveState);
             return;
           }
           if (msg.type === "tokenUpdate" || msg.type === "tokenLaunch") {
@@ -1697,6 +1788,14 @@ export default function Home(): ReactElement {
     } catch { /* backend busy */ }
   }, []);
 
+  const bundleLiveControl = useCallback(async (action: "arm" | "disarm" | "reset") => {
+    try {
+      const r = await fetch(`${API_BASE}/api/bundle/live/${action}`, { method: "POST" });
+      const j = await r.json() as { bundleLive?: BundleLiveState };
+      if (j.bundleLive) setBundleLive(j.bundleLive);
+    } catch { /* backend busy */ }
+  }, []);
+
   return (
     <div className="app">
       <Header search={search} setSearch={setSearch} coverage={coverage} wsConnected={wsConnected} />
@@ -1704,7 +1803,7 @@ export default function Home(): ReactElement {
 
       <div style={{ minHeight: 0, overflow: "hidden", position: "relative" }}>
         {tab === "terminal" && (
-          <TerminalView tokens={tokens} search={search} onSelectToken={handleSelectToken} paper={paper} onPaperControl={paperControl} live={live} onLiveControl={liveControl} bundle={bundle} />
+          <TerminalView tokens={tokens} search={search} onSelectToken={handleSelectToken} paper={paper} onPaperControl={paperControl} live={live} onLiveControl={liveControl} bundle={bundle} bundleLive={bundleLive} onBundleLiveControl={bundleLiveControl} />
         )}
         {tab === "token" && (
           <TokenView token={selectedToken} onSelectToken={handleSelectToken} paper={paper} />

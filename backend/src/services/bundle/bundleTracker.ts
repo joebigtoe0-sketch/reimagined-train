@@ -116,6 +116,10 @@ export class BundleTracker {
   private readonly gangWallets: Set<string>;
   private readonly suspects = new Map<string, Suspect>();
   private totalDetected = 0;
+  private onNewSuspect?: (s: BundleSuspect) => void;
+
+  /** Register a callback fired each time a new qualifying suspect is first detected. */
+  setOnNewSuspect(cb: (s: BundleSuspect) => void): void { this.onNewSuspect = cb; }
 
   constructor() {
     // Load the gang wallet list from the committed JSON file.
@@ -161,7 +165,7 @@ export class BundleTracker {
     if (!isQualifyingBuy) return;
     if (mc >= PRE_BUNDLE_MC) return; // already in bundle phase
 
-    this.suspects.set(event.mint, {
+    const newSuspect: Suspect = {
       mint: event.mint,
       symbol: "?",
       detectedAt: Date.now(),
@@ -172,9 +176,12 @@ export class BundleTracker {
       totalBuys: 1,
       totalSells: 0,
       largestBuySol: sol,
-    });
+    };
+    this.suspects.set(event.mint, newSuspect);
     this.totalDetected++;
     console.log(`[BundleTracker] NEW suspect ${event.mint.slice(0, 8)}… MC=$${Math.round(mc)} sol=${sol.toFixed(2)} score=60`);
+    // Notify the bundle live trader so it can enter immediately
+    if (this.onNewSuspect) this.onNewSuspect(toPublic(newSuspect));
   }
 
   /** Called on sell events to track buy/sell ratio on suspects. */
