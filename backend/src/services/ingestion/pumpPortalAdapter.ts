@@ -43,6 +43,30 @@ const PUMP_TOKEN_SUPPLY = 1_000_000_000;
 const RECONNECT_DELAY_MS = 3_000;
 const HEARTBEAT_MS = 30_000;
 
+/** getBlock returns this for slots not yet archived — transient, not an RPC fault. */
+class BlockNotReadyError extends Error {
+  constructor(readonly slot: number) {
+    super(`Block not available for slot ${slot}`);
+    this.name = "BlockNotReadyError";
+  }
+}
+
+function isBlockNotReadyMessage(msg: string): boolean {
+  return /block not available/i.test(msg);
+}
+
+type RetroTxEnvelope = {
+  transaction?: {
+    signatures?: string[];
+    message?: { accountKeys?: string[]; staticAccountKeys?: string[] };
+  };
+  meta?: {
+    preBalances?: number[];
+    postBalances?: number[];
+    loadedAddresses?: { writable?: string[]; readonly?: string[] };
+  };
+};
+
 interface PumpPortalMessage {
   message?: string;
   signature?: string;
@@ -264,8 +288,7 @@ export class PumpPortalAdapter implements IngestionSource {
       // are NEVER delivered via subscribeTokenTrade because our subscription
       // doesn't exist yet when PumpPortal broadcasts that block. Patch the gap
       // by querying the Solana RPC using balance-diff parsing.
-      // Two retrocheck attempts (was four) — each is getTransaction + getBlock ≈ 2 RPC calls.
-      // First success sets retroScanned and skips the second.
+      // Retrocheck: getBlock is often unavailable for ~10–30s on RPC; retry + sig fallback.
       {
         const mintSnap      = msg.mint;
         const devWalletSnap = msg.traderPublicKey ?? "";
@@ -273,11 +296,15 @@ export class PumpPortalAdapter implements IngestionSource {
         const createdAtMs   = Date.now();
         setTimeout(
           () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createSigSnap, createdAtMs, false),
-          1_000,
+          3_000,
+        );
+        setTimeout(
+          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createSigSnap, createdAtMs, false),
+          15_000,
         );
         setTimeout(
           () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createSigSnap, createdAtMs, true),
-          8_000,
+          45_000,
         );
       }
 
@@ -440,8 +467,12 @@ export class PumpPortalAdapter implements IngestionSource {
           return;
         } catch (err) {
           const msg = (err as Error).message ?? "";
-          // Key/quota errors → 5-min cooldown (buying credits clears it after next deploy or cooldown)
-          // Rate-limit errors → 30-sec cooldown
+          // Block not indexed yet — normal for fresh slots; do NOT cooldown the RPC.
+          if (err instanceof BlockNotReadyError || isBlockNotReadyMessage(msg)) {
+            console.log(`[Retrocheck ${mint.slice(0, 8)}] creation block not indexed yet — will retry`);
+            return;
+          }
+          // Key/quota errors → 5-min cooldown; rate-limit → 30s; other real faults → 15s
           const isKeyError  = msg.includes("Invalid API key") || msg.includes("401") || msg.includes("403");
           const isRateError = msg.includes("compute units") || msg.includes("Too many requests") || msg.includes("429");
           const coolMs      = isKeyError ? 5 * 60_000 : isRateError ? 30_000 : 15_000;
@@ -558,87 +589,142 @@ export class PumpPortalAdapter implements IngestionSource {
 
     console.log(`${tag} firing via ${rpcLabel}, creation slot ${createSlot} (bc ${bondingCurve.slice(0, 8)})`);
 
-    // ── Pull the whole creation block and scan every tx touching this BC ────────
-    const block = (await rpcCall({
-      jsonrpc: "2.0", id: 4,
-      method:  "getBlock",
-      params:  [createSlot, {
-        encoding: "json", maxSupportedTransactionVersion: 0,
-        transactionDetails: "full", rewards: false,
-      }],
-    })) as {
-      transactions?: Array<{
-        transaction?: {
-          signatures?: string[];
-          message?: { accountKeys?: string[]; staticAccountKeys?: string[] };
-        };
-        meta?: {
-          preBalances?: number[];
-          postBalances?: number[];
-          loadedAddresses?: { writable?: string[]; readonly?: string[] };
-        };
-      }>;
-    } | null;
-
-    if (!block || !block.transactions) {
-      if (isRetry) console.log(`${tag} block ${createSlot} not available yet — no detection`);
-      return; // not finalized yet; a later retry will catch it
+    // ── Prefer full block scan; fall back to per-sig fetch when block isn't archived yet ──
+    let detected = 0;
+    let block: { transactions?: RetroTxEnvelope[] } | null = null;
+    try {
+      block = (await rpcCall({
+        jsonrpc: "2.0", id: 4,
+        method:  "getBlock",
+        params:  [createSlot, {
+          encoding: "json", maxSupportedTransactionVersion: 0,
+          transactionDetails: "full", rewards: false,
+          commitment: "confirmed",
+        }],
+      })) as { transactions?: RetroTxEnvelope[] } | null;
+    } catch (err) {
+      const msg = (err as Error).message ?? "";
+      if (!isBlockNotReadyMessage(msg)) throw err;
     }
 
-    // Block is finalized — this scan is definitive. Don't waste RPC on later retries.
+    if (block?.transactions?.length) {
+      this.retroScanned.add(mint);
+      for (const t of block.transactions) {
+        if (this._injectJitoBuyFromTx(t, mint, bondingCurve, devWallet, createdAtMs, tag)) detected++;
+      }
+      console.log(`${tag} scan complete (getBlock) — ${detected} Jito buy(s) in slot ${createSlot}`);
+      return;
+    }
+
+    // Block archive lag — scan txs in this slot via bonding-curve signatures (works earlier).
+    detected = await this._scanCreationSlotViaSignatures(
+      rpcCall, createSlot, bondingCurve, mint, devWallet, createdAtMs, tag,
+    );
+
+    if (detected > 0) {
+      this.retroScanned.add(mint);
+      console.log(`${tag} scan complete (signatures) — ${detected} Jito buy(s) in slot ${createSlot}`);
+      return;
+    }
+
+    if (!isRetry) {
+      throw new BlockNotReadyError(createSlot);
+    }
+
     this.retroScanned.add(mint);
+    console.log(`${tag} final scan — no Jito buy in creation slot ${createSlot}`);
+  }
+
+  /** Parse one tx envelope (from getBlock or getTransaction) for a same-block whale buy. */
+  private _injectJitoBuyFromTx(
+    t: RetroTxEnvelope,
+    mint: string,
+    bondingCurve: string,
+    devWallet: string,
+    createdAtMs: number,
+    tag: string,
+  ): boolean {
+    const msg = t.transaction?.message;
+    const staticKeys = (msg?.staticAccountKeys ?? msg?.accountKeys ?? []).map((k) =>
+      typeof k === "string" ? k : (k as Record<string, string>).pubkey ?? "",
+    );
+    const loadedWritable = t.meta?.loadedAddresses?.writable ?? [];
+    const loadedReadonly = t.meta?.loadedAddresses?.readonly ?? [];
+    const keys = [...staticKeys, ...loadedWritable, ...loadedReadonly];
+
+    if (!keys.includes(bondingCurve)) return false;
+
+    const pre  = t.meta?.preBalances  ?? [];
+    const post = t.meta?.postBalances ?? [];
+    const sig  = t.transaction?.signatures?.[0] ?? "";
+    const minSol = getBundleSettings().minTriggerSol;
+    const minLamports = minSol * 1_000_000_000;
+
+    for (let i = 0; i < pre.length; i++) {
+      const deltaLamports = (post[i] ?? 0) - (pre[i] ?? 0);
+      if (deltaLamports >= -minLamports) continue;
+      const account = keys[i] || `idx-${i}`;
+      if (!account || account === devWallet) continue;
+      const sol = Math.abs(deltaLamports) / 1e9 - 0.01;
+      if (sol < minSol) continue;
+
+      const dedupKey = `${sig}:${mint}:buy`;
+      if (this.seenTradeSigs.has(dedupKey)) return false;
+      this.seenTradeSigs.add(dedupKey);
+
+      this.tradeBuffer.push({
+        mint,
+        traderWallet: account,
+        side:         "buy",
+        amountSol:    sol,
+        tokenAmount:  0,
+        priceUsd:     0,
+        marketCap:    0,
+        signature:    sig,
+        timestamp:    new Date(createdAtMs).toISOString(),
+        isJitoBundle: true,
+      });
+      console.log(`${tag} ⚡ JITO BUY DETECTED! +${sol.toFixed(2)} SOL from ${account.slice(0, 8)} (sig ${sig.slice(0, 12)}) — injected`);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * When getBlock isn't archived yet, fetch bonding-curve sigs and pull only
+   * txs in the creation slot — individual txs are usually available first.
+   */
+  private async _scanCreationSlotViaSignatures(
+    rpcCall: (body: object) => Promise<unknown>,
+    createSlot: number,
+    bondingCurve: string,
+    mint: string,
+    devWallet: string,
+    createdAtMs: number,
+    tag: string,
+  ): Promise<number> {
+    const sigs = (await rpcCall({
+      jsonrpc: "2.0", id: 5,
+      method:  "getSignaturesForAddress",
+      params:  [bondingCurve, { limit: 100 }],
+    })) as Array<{ signature: string; slot?: number }> | null;
+
+    if (!sigs?.length) return 0;
+
+    const inSlot = sigs.filter((s) => s.slot === createSlot);
+    if (inSlot.length === 0) return 0;
 
     let detected = 0;
-    for (const t of block.transactions) {
-      const msg = t.transaction?.message;
-      const staticKeys = (msg?.staticAccountKeys ?? msg?.accountKeys ?? []).map((k) =>
-        typeof k === "string" ? k : (k as Record<string,string>).pubkey ?? "",
-      );
-      const loadedWritable = t.meta?.loadedAddresses?.writable ?? [];
-      const loadedReadonly = t.meta?.loadedAddresses?.readonly ?? [];
-      const keys = [...staticKeys, ...loadedWritable, ...loadedReadonly];
-
-      // Only txs that touch THIS token's bonding curve are buys/sells of this token.
-      if (!keys.includes(bondingCurve)) continue;
-
-      const pre  = t.meta?.preBalances  ?? [];
-      const post = t.meta?.postBalances ?? [];
-      const sig  = t.transaction?.signatures?.[0] ?? "";
-
-      // pre/post arrays cover ALL accounts (static + ALT-loaded) in matching order.
-      for (let i = 0; i < pre.length; i++) {
-        const deltaLamports = (post[i] ?? 0) - (pre[i] ?? 0);
-        const minSol = getBundleSettings().minTriggerSol;
-        const minLamports = minSol * 1_000_000_000;
-        if (deltaLamports >= -minLamports) continue;
-        const account = keys[i] || `idx-${i}`;
-        if (!account || account === devWallet) continue;     // skip dev self-buy
-        const sol = Math.abs(deltaLamports) / 1e9 - 0.01;    // minus fee/tip overhead
-        if (sol < minSol) continue;
-
-        const dedupKey = `${sig}:${mint}:buy`;
-        if (this.seenTradeSigs.has(dedupKey)) break;
-        this.seenTradeSigs.add(dedupKey);
-
-        this.tradeBuffer.push({
-          mint,
-          traderWallet: account,
-          side:         "buy",
-          amountSol:    sol,
-          tokenAmount:  0,
-          priceUsd:     0,
-          marketCap:    0,
-          signature:    sig,
-          timestamp:    new Date(createdAtMs).toISOString(),
-          isJitoBundle: true,
-        });
-        detected++;
-        console.log(`${tag} ⚡ JITO BUY DETECTED! +${sol.toFixed(2)} SOL from ${account.slice(0, 8)} (sig ${sig.slice(0, 12)}) — injected`);
-        break; // one detection per tx is enough
-      }
+    for (const { signature } of inSlot) {
+      const tx = (await rpcCall({
+        jsonrpc: "2.0", id: 6,
+        method:  "getTransaction",
+        params:  [signature, { encoding: "json", maxSupportedTransactionVersion: 0, commitment: "confirmed" }],
+      })) as RetroTxEnvelope | null;
+      if (!tx) continue;
+      if (this._injectJitoBuyFromTx(tx, mint, bondingCurve, devWallet, createdAtMs, tag)) detected++;
     }
-
-    console.log(`${tag} scan complete — ${detected} Jito buy(s) in creation slot ${createSlot}`);
+    return detected;
   }
 
   private capSet(set: Set<string>, max: number, keep: number): void {
