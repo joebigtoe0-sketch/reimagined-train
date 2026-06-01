@@ -82,6 +82,9 @@ export class PumpPortalAdapter implements IngestionSource {
   private awaitingPong = false;
   // RPC endpoints on cooldown after a key/quota error: url → cooldown-until timestamp
   private readonly rpcCooldowns = new Map<string, number>();
+  // Mints whose creation block we already fully scanned — skip further retrocheck
+  // attempts (the block is finalized, so the first successful scan is definitive).
+  private readonly retroScanned = new Set<string>();
   // Retrocheck concurrency limiter — avoid hammering Alchemy when tokens burst
   private retrochecksInFlight = 0;
   private readonly retrochecksQueue: Array<() => Promise<void>> = [];
@@ -264,23 +267,24 @@ export class PumpPortalAdapter implements IngestionSource {
       {
         const mintSnap      = msg.mint;
         const devWalletSnap = msg.traderPublicKey ?? "";
+        const createSigSnap = msg.signature ?? "";   // create tx sig → exact creation slot
         const createdAtMs   = Date.now();
         setTimeout(
-          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createdAtMs, false),
+          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createSigSnap, createdAtMs, false),
           800
         );
         setTimeout(
-          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createdAtMs, false),
+          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createSigSnap, createdAtMs, false),
           2000
         );
         // Sweep at T+8s: most Jito bundle txs are indexed by now.
         setTimeout(
-          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createdAtMs, false),
+          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createSigSnap, createdAtMs, false),
           8000
         );
         // Final sweep at T+20s: insurance for slow RPC indexers (seen >8s lag on Helius).
         setTimeout(
-          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createdAtMs, true),
+          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createSigSnap, createdAtMs, true),
           20000
         );
       }
@@ -406,6 +410,7 @@ export class PumpPortalAdapter implements IngestionSource {
   private async heliusCatchEarlyBuy(
     mint: string,
     devWallet: string,
+    createSig: string,
     createdAtMs: number,
     isRetry = false,
   ): Promise<void> {
@@ -435,7 +440,7 @@ export class PumpPortalAdapter implements IngestionSource {
     await this._enqueueRetrocheck(async () => {
       for (const rpcUrl of rpcCandidates) {
         try {
-          await this._rpcRetrocheck(rpcUrl, mint, devWallet, createdAtMs, isRetry);
+          await this._rpcRetrocheck(rpcUrl, mint, devWallet, createSig, createdAtMs, isRetry);
           return;
         } catch (err) {
           const msg = (err as Error).message ?? "";
@@ -482,10 +487,12 @@ export class PumpPortalAdapter implements IngestionSource {
     rpcUrl: string,
     mint: string,
     devWallet: string,
+    createSig: string,
     createdAtMs: number,
     isRetry = false,
   ): Promise<void> {
     const tag = `[Retrocheck ${mint.slice(0, 8)}]`;
+    if (this.retroScanned.has(mint)) return; // already scanned the creation block
     const rpcLabel = rpcUrl.includes("alchemy") ? "Alchemy"
                    : rpcUrl.includes("helius")  ? "Helius"
                    : "PublicRPC";
@@ -512,145 +519,108 @@ export class PumpPortalAdapter implements IngestionSource {
       return;
     }
 
-    console.log(`${tag} firing via ${rpcLabel} (bonding curve: ${bondingCurve.slice(0, 8)})`);
-
-    // Use a large limit so the oldest entries (Jito bundle creation block) are always
-    // included — a popular token can get 50+ buys in the first second, which would
-    // push the Jito bundle off the bottom of a small limit window.
-    const rawSigs = (await rpcCall({
-      jsonrpc: "2.0", id: 1,
-      method:  "getSignaturesForAddress",
-      params:  [bondingCurve, { limit: 1000 }],
-    })) as Array<{ signature: string; blockTime?: number }> | null;
-
-    if (!rawSigs || rawSigs.length === 0) {
-      if (isRetry) console.log(`${tag} still no sigs at retry — no Jito bundle`);
-      return;
-    }
-
-    // If only 1 signature exists it's the create tx itself — no Jito bundle possible
-    if (rawSigs.length === 1) {
-      if (isRetry) console.log(`${tag} only 1 sig (create tx only) — no Jito bundle`);
-      return;
-    }
-
-    console.log(`${tag} found ${rawSigs.length} sigs via ${rpcLabel}, checking early txs`);
-
-    // Returned newest-first; reverse so we process oldest (creation block) first
-    const sigs = [...rawSigs].reverse();
-
-    // A Jito bundle = the create tx + buy tx(s) landing in the SAME SLOT (block).
-    // We read the creation slot from the first (oldest) bonding-curve tx, then ONLY
-    // count ≥7 SOL buys that land in that EXACT slot. Buys in any later slot — even
-    // ~1s later (e.g. MAYHEM-mode snipes) — are NOT same-block bundles → ignored.
+    // ── Resolve the EXACT creation slot ────────────────────────────────────────
+    // A Jito bundle = the create tx + buy tx(s) landing in the SAME slot (block).
+    // We must scan that exact block. The create tx signature comes straight from the
+    // PumpPortal create event, so one getTransaction gives us the authoritative slot.
+    // This is robust even for hyper-active tokens — previously we inferred the slot
+    // from getSignaturesForAddress(limit:1000), but on a token with >1000 early txs
+    // the creation block scrolls out of that window and the bundle was never seen.
     let createSlot: number | null = null;
 
-    for (const sigInfo of sigs) {
-      // Small pause to respect RPC rate limits
-      await new Promise<void>((resolve) => setTimeout(resolve, 250));
-
-      const tx = (await rpcCall({
-        jsonrpc: "2.0", id: 2,
+    if (createSig) {
+      const ctx = (await rpcCall({
+        jsonrpc: "2.0", id: 1,
         method:  "getTransaction",
-        params:  [
-          sigInfo.signature,
-          { encoding: "json", maxSupportedTransactionVersion: 0, commitment: "confirmed" },
-        ],
-      })) as {
-        slot?: number;
+        params:  [createSig, { encoding: "json", maxSupportedTransactionVersion: 0, commitment: "confirmed" }],
+      })) as { slot?: number } | null;
+      createSlot = ctx?.slot ?? null;
+    }
+
+    // Fallback: no create sig (older events) — derive from the OLDEST bonding-curve sig.
+    if (createSlot === null) {
+      const sigs = (await rpcCall({
+        jsonrpc: "2.0", id: 2,
+        method:  "getSignaturesForAddress",
+        params:  [bondingCurve, { limit: 1000 }],
+      })) as Array<{ signature: string }> | null;
+      if (sigs && sigs.length > 0) {
+        const oldest = sigs[sigs.length - 1];
+        const otx = (await rpcCall({
+          jsonrpc: "2.0", id: 3,
+          method:  "getTransaction",
+          params:  [oldest.signature, { encoding: "json", maxSupportedTransactionVersion: 0, commitment: "confirmed" }],
+        })) as { slot?: number } | null;
+        createSlot = otx?.slot ?? null;
+      }
+    }
+
+    if (createSlot === null) {
+      if (isRetry) console.log(`${tag} could not resolve creation slot — skipping`);
+      return;
+    }
+
+    console.log(`${tag} firing via ${rpcLabel}, creation slot ${createSlot} (bc ${bondingCurve.slice(0, 8)})`);
+
+    // ── Pull the whole creation block and scan every tx touching this BC ────────
+    const block = (await rpcCall({
+      jsonrpc: "2.0", id: 4,
+      method:  "getBlock",
+      params:  [createSlot, {
+        encoding: "json", maxSupportedTransactionVersion: 0,
+        transactionDetails: "full", rewards: false,
+      }],
+    })) as {
+      transactions?: Array<{
         transaction?: {
-          message?: {
-            // Legacy transactions
-            accountKeys?: string[];
-            // V0 (versioned) transactions — Jito bundles use these
-            staticAccountKeys?: string[];
-          };
+          signatures?: string[];
+          message?: { accountKeys?: string[]; staticAccountKeys?: string[] };
         };
         meta?: {
           preBalances?: number[];
           postBalances?: number[];
-          // V0 ALT-resolved pubkeys — appended after staticAccountKeys in balance order
           loadedAddresses?: { writable?: string[]; readonly?: string[] };
         };
-      } | null;
+      }>;
+    } | null;
 
-      if (!tx) {
-        console.log(`${tag} tx not found (not yet confirmed?)`);
-        continue;
-      }
+    if (!block || !block.transactions) {
+      if (isRetry) console.log(`${tag} block ${createSlot} not available yet — no detection`);
+      return; // not finalized yet; a later retry will catch it
+    }
 
-      const txSlot = tx.slot ?? null;
+    // Block is finalized — this scan is definitive. Don't waste RPC on later retries.
+    this.retroScanned.add(mint);
 
-      // First processed tx is the create — its slot defines the bundle block.
-      if (createSlot === null) {
-        createSlot = txSlot;
-        console.log(`${tag} creation slot = ${createSlot ?? "unknown"} (sig ${sigInfo.signature.slice(0, 12)})`);
-      }
-
-      // Once we pass the creation slot, no more same-block txs are possible — stop.
-      if (createSlot !== null && txSlot !== null && txSlot > createSlot) {
-        console.log(`${tag} slot ${txSlot} > creation slot ${createSlot} — past bundle block, stopping`);
-        break;
-      }
-
-      // Defensive: skip anything before the creation slot (shouldn't happen).
-      if (createSlot !== null && txSlot !== null && txSlot < createSlot) continue;
-
-      console.log(`${tag} checking tx ${sigInfo.signature.slice(0, 12)} (slot ${txSlot ?? "?"})`);
-
-      // V0 transactions use staticAccountKeys; legacy use accountKeys — check both
-      const msg  = tx.transaction?.message;
+    let detected = 0;
+    for (const t of block.transactions) {
+      const msg = t.transaction?.message;
       const staticKeys = (msg?.staticAccountKeys ?? msg?.accountKeys ?? []).map((k) =>
         typeof k === "string" ? k : (k as Record<string,string>).pubkey ?? "",
       );
-      // The full account list (matching pre/post balance order) is:
-      //   staticAccountKeys ++ loadedAddresses.writable ++ loadedAddresses.readonly
-      // Appending the ALT-resolved addresses lets us read the REAL buyer pubkey for
-      // V0 Jito bundle buys instead of a placeholder.
-      const loadedWritable = tx.meta?.loadedAddresses?.writable ?? [];
-      const loadedReadonly = tx.meta?.loadedAddresses?.readonly ?? [];
+      const loadedWritable = t.meta?.loadedAddresses?.writable ?? [];
+      const loadedReadonly = t.meta?.loadedAddresses?.readonly ?? [];
       const keys = [...staticKeys, ...loadedWritable, ...loadedReadonly];
 
-      const pre  = tx.meta?.preBalances  ?? [];
-      const post = tx.meta?.postBalances ?? [];
+      // Only txs that touch THIS token's bonding curve are buys/sells of this token.
+      if (!keys.includes(bondingCurve)) continue;
 
-      // pre/post balance arrays cover ALL accounts including ALT-loaded ones.
-      const totalAccounts = pre.length;
-      console.log(`${tag} tx has ${staticKeys.length} static + ${loadedWritable.length + loadedReadonly.length} ALT keys, ${totalAccounts} balance entries`);
+      const pre  = t.meta?.preBalances  ?? [];
+      const post = t.meta?.postBalances ?? [];
+      const sig  = t.transaction?.signatures?.[0] ?? "";
 
-      // Build changes for every account index — resolve real address when possible.
-      const changes = Array.from({ length: totalAccounts }, (_, i) => {
+      // pre/post arrays cover ALL accounts (static + ALT-loaded) in matching order.
+      for (let i = 0; i < pre.length; i++) {
+        const deltaLamports = (post[i] ?? 0) - (pre[i] ?? 0);
+        if (deltaLamports >= -7_000_000_000) continue;       // spent < 7 SOL
         const account = keys[i] || `idx-${i}`;
-        return { account, delta: (post[i] ?? 0) - (pre[i] ?? 0), isAlt: i >= staticKeys.length };
-      });
-
-      const biggest = [...changes].sort((a, b) => a.delta - b.delta).slice(0, 3);
-      biggest.forEach((c) => {
-        const solDelta = (c.delta / 1e9).toFixed(4);
-        const isDevTag = c.account === devWallet ? " [DEV]" : "";
-        const isAlt    = c.isAlt ? " [ALT]" : "";
-        console.log(`${tag}   ${c.account.slice(0, 12)} Δ=${solDelta} SOL${isDevTag}${isAlt}`);
-      });
-
-      for (const { account, delta: deltaLamports } of changes) {
-        // A large negative delta = wallet spent ≥ 7 SOL
-        if (deltaLamports >= -7_000_000_000) continue;
-        if (!account || account === devWallet) continue;
-
-        // Subtract typical overhead (~0.01 SOL for fee + tip)
-        const sol = Math.abs(deltaLamports) / 1e9 - 0.01;
+        if (!account || account === devWallet) continue;     // skip dev self-buy
+        const sol = Math.abs(deltaLamports) / 1e9 - 0.01;    // minus fee/tip overhead
         if (sol < 7) continue;
 
-        const dedupKey = `${sigInfo.signature}:${mint}:buy`;
-        if (this.seenTradeSigs.has(dedupKey)) {
-          console.log(`${tag} already seen this sig — skip`);
-          continue;
-        }
+        const dedupKey = `${sig}:${mint}:buy`;
+        if (this.seenTradeSigs.has(dedupKey)) break;
         this.seenTradeSigs.add(dedupKey);
-
-        const blockTs = sigInfo.blockTime
-          ? new Date(sigInfo.blockTime * 1000).toISOString()
-          : new Date(createdAtMs).toISOString();
 
         this.tradeBuffer.push({
           mint,
@@ -660,19 +630,17 @@ export class PumpPortalAdapter implements IngestionSource {
           tokenAmount:  0,
           priceUsd:     0,
           marketCap:    0,
-          signature:    sigInfo.signature,
-          timestamp:    blockTs,
+          signature:    sig,
+          timestamp:    new Date(createdAtMs).toISOString(),
           isJitoBundle: true,
         });
-
-        console.log(
-          `${tag} ⚡ JITO BUY DETECTED! +${sol.toFixed(2)} SOL from ${account.slice(0, 8)} — injecting into trade buffer`
-        );
-        break; // one detection per transaction is enough to trigger the signal
+        detected++;
+        console.log(`${tag} ⚡ JITO BUY DETECTED! +${sol.toFixed(2)} SOL from ${account.slice(0, 8)} (sig ${sig.slice(0, 12)}) — injected`);
+        break; // one detection per tx is enough
       }
     }
 
-    console.log(`${tag} retrocheck complete`);
+    console.log(`${tag} scan complete — ${detected} Jito buy(s) in creation slot ${createSlot}`);
   }
 
   private capSet(set: Set<string>, max: number, keep: number): void {

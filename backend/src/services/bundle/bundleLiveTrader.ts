@@ -144,7 +144,10 @@ export class BundleLiveTrader {
     if (!this.armed || !this.executor) return;
     if (this.traded.has(suspect.mint)) return;
     if (this.positions.size >= MAX_OPEN) return;
-    if (suspect.currentMc <= 0 || suspect.currentMc >= 25_000) return;
+    // Same-block Jito buys come from the RPC retrocheck with MC unknown (0) — that's
+    // EXPECTED and means we're entering at launch. Previously `currentMc <= 0` here
+    // silently rejected every Jito bundle. Only skip if MC is known AND already too high.
+    if (suspect.currentMc >= 25_000) return;
 
     this.traded.add(suspect.mint);
     void this.executeBuy(suspect);
@@ -154,11 +157,29 @@ export class BundleLiveTrader {
   onToken(token: TokenState): void {
     const pos = this.positions.get(token.mint);
     if (!pos) return;
+    if (token.symbol) pos.symbol = token.symbol;
+
+    const dead = token.lifecycle === "dead" || token.lifecycle === "failed";
+
     if (token.marketCap > 0) {
+      // Same-block Jito entries are booked with MC unknown (0). Anchor the position's
+      // cost basis to the FIRST real MC tick we receive, then run normal exit logic.
+      if (pos.entryMc <= 0) {
+        pos.entryMc = pos.peakMc = pos.currentMc = token.marketCap;
+        console.log(`[BundleLive] ${pos.symbol} entry MC anchored @ $${Math.round(token.marketCap)}`);
+        return; // basis just established — no exit check this tick
+      }
       pos.currentMc = token.marketCap;
-      if (token.symbol) pos.symbol = token.symbol;
     }
-    this.checkExit(pos, token.lifecycle === "dead" || token.lifecycle === "failed");
+
+    // Without a real basis yet, the trailing/hard-stop math is meaningless.
+    // Only act if the token is already dead → write the position off.
+    if (pos.entryMc <= 0) {
+      if (dead) void this.executeSell(pos, "dead");
+      return;
+    }
+
+    this.checkExit(pos, dead);
   }
 
   private async executeBuy(suspect: BundleSuspect): Promise<void> {
@@ -213,7 +234,8 @@ export class BundleLiveTrader {
 
     try {
       const result = await this.executor.execute("sell", pos.mint, "100%");
-      const ratio = pos.entryMc > 0 ? pos.currentMc / pos.entryMc : 1;
+      // No basis established (died before first MC tick) → treat as total loss.
+      const ratio = pos.entryMc > 0 ? pos.currentMc / pos.entryMc : 0;
       const solOut = round(pos.solIn * ratio * 0.94);
       const pnl = round(solOut - pos.solIn);
       this.dailyPnl += pnl;
