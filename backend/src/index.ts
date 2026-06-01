@@ -84,16 +84,29 @@ app.post("/api/paper/stop", async () => { engine.stopPaper(); return { paper: en
 app.post("/api/paper/reset", async () => { engine.resetPaper(); return { paper: engine.paperState() }; });
 
 app.get("/api/bundle", async () => ({ bundle: engine.bundleState() }));
+const applyBundleSettings = (body: {
+  minTriggerSol?: number;
+  takeProfitPct?: number;
+  timeoutMs?: number;
+  betSize?: number;
+}) => {
+  engine.updateBundleSettings(body ?? {});
+  return { ok: true as const, settings: engine.bundleSettings(), bundleLive: engine.bundleLiveState() };
+};
+
 app.get("/api/bundle/settings", async () => ({
+  ok: true,
   settings: engine.bundleSettings(),
   bundleLive: engine.bundleLiveState(),
 }));
 app.patch<{ Body: { minTriggerSol?: number; takeProfitPct?: number; timeoutMs?: number; betSize?: number } }>(
   "/api/bundle/settings",
-  async (request) => {
-    engine.updateBundleSettings(request.body ?? {});
-    return { settings: engine.bundleSettings(), bundleLive: engine.bundleLiveState() };
-  },
+  async (request) => applyBundleSettings(request.body ?? {}),
+);
+// Some hosts/proxies block PATCH — POST alias for dashboard saves.
+app.post<{ Body: { minTriggerSol?: number; takeProfitPct?: number; timeoutMs?: number; betSize?: number } }>(
+  "/api/bundle/settings",
+  async (request) => applyBundleSettings(request.body ?? {}),
 );
 app.get("/api/bundle/live", async () => ({ bundleLive: engine.bundleLiveState() }));
 app.post("/api/bundle/live/arm", async () => { engine.armBundleLive(); return { bundleLive: engine.bundleLiveState() }; });

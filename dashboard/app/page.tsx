@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, CSSProperties } from "react";
-import type { AlertEvent, AlertRule, BundleLiveState, BundleState, BundleSuspect, DeveloperStat, LiveState, PaperLifetime, PaperState, PaperTrade, TokenState, WalletProfile } from "../lib/contracts";
+import type { AlertEvent, AlertRule, BundleLiveState, BundleSettings, BundleState, BundleSuspect, DeveloperStat, LiveState, PaperLifetime, PaperState, PaperTrade, TokenState, WalletProfile } from "../lib/contracts";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8080";
 const WS_BASE = API_BASE.startsWith("https://")
@@ -1458,34 +1458,66 @@ function BundleSniperPanel({ bundle, bundleLive, onBundleLiveControl, onBundleLi
   const [timeoutSec, setTimeoutSec] = useState(180);
   const [betSize, setBetSize] = useState(0.4);
   const [savingCfg, setSavingCfg] = useState(false);
+  const [cfgMsg, setCfgMsg] = useState("");
 
-  useEffect(() => {
-    const c = bundleLive?.config;
-    if (!c) return;
+  const applySettingsToForm = useCallback((c: BundleSettings) => {
     setMinSol(c.minTriggerSol);
     setTpPct(c.takeProfitPct);
     setTimeoutSec(Math.round(c.timeoutMs / 1000));
     setBetSize(c.betSize);
-  }, [bundleLive?.config]);
+  }, []);
+
+  // Load once on mount — do NOT re-sync on every WebSocket tick (that overwrote edits).
+  useEffect(() => {
+    void (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/bundle/settings`);
+        if (!r.ok) return;
+        const j = await r.json() as { settings?: BundleSettings; bundleLive?: BundleLiveState };
+        if (j.settings) applySettingsToForm(j.settings);
+        if (j.bundleLive) onBundleLiveUpdate(j.bundleLive);
+      } catch { /* backend starting */ }
+    })();
+  }, [applySettingsToForm, onBundleLiveUpdate]);
 
   const saveBundleSettings = useCallback(async () => {
     setSavingCfg(true);
+    setCfgMsg("");
+    const body = {
+      minTriggerSol: Number(minSol),
+      takeProfitPct: Number(tpPct),
+      timeoutMs: Math.round(Number(timeoutSec) * 1000),
+      betSize: Number(betSize),
+    };
     try {
-      const r = await fetch(`${API_BASE}/api/bundle/settings`, {
-        method: "PATCH",
+      // POST — some proxies block PATCH
+      let r = await fetch(`${API_BASE}/api/bundle/settings`, {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          minTriggerSol: Number(minSol),
-          takeProfitPct: Number(tpPct),
-          timeoutMs: Math.round(Number(timeoutSec) * 1000),
-          betSize: Number(betSize),
-        }),
+        body: JSON.stringify(body),
       });
-      const j = await r.json() as { bundleLive?: BundleLiveState };
+      if (!r.ok && r.status === 404) {
+        r = await fetch(`${API_BASE}/api/bundle/settings`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      }
+      if (!r.ok) {
+        setCfgMsg(`Save failed (${r.status})`);
+        return;
+      }
+      const j = await r.json() as { settings?: BundleSettings; bundleLive?: BundleLiveState };
+      if (j.settings) applySettingsToForm(j.settings);
       if (j.bundleLive) onBundleLiveUpdate(j.bundleLive);
-    } catch { /* backend busy */ }
-    finally { setSavingCfg(false); }
-  }, [minSol, tpPct, timeoutSec, betSize, onBundleLiveUpdate]);
+      setCfgMsg("Settings saved");
+      setTimeout(() => setCfgMsg(""), 4000);
+    } catch {
+      setCfgMsg("Save failed — check API connection");
+    } finally {
+      setSavingCfg(false);
+    }
+  }, [minSol, tpPct, timeoutSec, betSize, applySettingsToForm, onBundleLiveUpdate]);
 
   const scoreColor = (s: number) =>
     s >= 80 ? "var(--up)" : s >= 50 ? "#f59e0b" : "var(--text-2)";
@@ -1616,8 +1648,17 @@ function BundleSniperPanel({ bundle, bundleLive, onBundleLiveControl, onBundleLi
             {savingCfg ? "…" : "APPLY"}
           </button>
         </div>
-        <div className="dim" style={{ fontSize: 9, marginTop: 4 }}>
-          Flip: buy Jito bundle → sell at +{tpPct}% MC (timeout {timeoutSec === 0 ? "off" : `${timeoutSec}s`})
+        <div style={{ fontSize: 9, marginTop: 4, minHeight: 14 }}>
+          <span className="dim">Flip: buy Jito bundle → sell at +{tpPct}% MC (timeout {timeoutSec === 0 ? "off" : `${timeoutSec}s`})</span>
+          {cfgMsg && (
+            <span style={{
+              marginLeft: 8,
+              color: cfgMsg.includes("saved") ? "var(--up)" : "var(--dn)",
+              fontWeight: 600,
+            }}>
+              {cfgMsg}
+            </span>
+          )}
         </div>
 
         {/* P&L summary row */}
