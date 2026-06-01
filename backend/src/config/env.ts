@@ -25,6 +25,11 @@ const envSchema = z.object({
   // Optional dedicated RPC for Jito-bundle retrocheck only (standard JSON-RPC, not webhooks).
   // If unset: Helius RPC → Alchemy → public mainnet (in that order).
   BUNDLE_RPC_URL: z.string().optional(),
+  // logsSubscribe on bonding-curve PDA — detects same-block buys in ~0.5–2s (not 10s+ getBlock lag).
+  BUNDLE_LOGS_WS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((v) => v === "true"),
   // Full Solana RPC URL (with key) used for on-chain checks like Mayhem Mode
   // detection, e.g. https://solana-mainnet.g.alchemy.com/v2/<apikey>.
   ALCHEMY_API: z.string().optional(),

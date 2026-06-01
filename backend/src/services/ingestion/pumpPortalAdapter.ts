@@ -19,6 +19,7 @@ import { WebSocket } from "ws";
 import { PublicKey } from "@solana/web3.js";
 import { env } from "../../config/env.js";
 import { getBundleSettings } from "../bundle/bundleSettings.js";
+import { BundleLogsWatcher, resolveBundleRpcHttp, type BundleLogHit } from "./bundleLogsWatcher.js";
 import type { IngestionSource, LaunchInfo, TradeInfo, MigrationInfo } from "./ingestionSource.js";
 
 // Pump.fun on-chain program — used to derive the bonding curve PDA for each token.
@@ -113,8 +114,16 @@ export class PumpPortalAdapter implements IngestionSource {
   // Retrocheck concurrency limiter — avoid hammering Alchemy when tokens burst
   private retrochecksInFlight = 0;
   private readonly retrochecksQueue: Array<() => Promise<void>> = [];
+  /** Real-time logsSubscribe per new mint (sub-second bundle detection). */
+  private readonly bundleLogs: BundleLogsWatcher;
+  /** createSig → slot, primed immediately on token create. */
+  private readonly createSlotByMint = new Map<string, number>();
   // Debug: tracks recently-created mints so we can log what arrives within 3s
   private _debugWindows = new Map<string, { createdAt: number; devWallet: string }>();
+
+  constructor() {
+    this.bundleLogs = new BundleLogsWatcher((hit) => { void this._onBundleLogHit(hit); });
+  }
 
   /** Launches are free, so this provider is always usable. */
   get available(): boolean {
@@ -123,6 +132,13 @@ export class PumpPortalAdapter implements IngestionSource {
 
   async verify(): Promise<void> {
     this.connect();
+    if (this.bundleLogs.enabled) {
+      console.log("[BundleLogs] Real-time bonding-curve logsSubscribe enabled");
+    } else {
+      console.warn(
+        "[BundleLogs] Disabled — set HELIUS_RPC_URL or BUNDLE_RPC_URL for sub-second bundle detection",
+      );
+    }
     if (!env.PUMPPORTAL_API_KEY) {
       console.warn(
         "[PumpPortal] No PUMPPORTAL_API_KEY set — launches (free) will stream, " +
@@ -288,24 +304,13 @@ export class PumpPortalAdapter implements IngestionSource {
       // are NEVER delivered via subscribeTokenTrade because our subscription
       // doesn't exist yet when PumpPortal broadcasts that block. Patch the gap
       // by querying the Solana RPC using balance-diff parsing.
-      // Retrocheck: getBlock is often unavailable for ~10–30s on RPC; retry + sig fallback.
+      // Bundle detection: logsSubscribe (fast) + signature polls (400ms–3s) + getBlock fallback (6s+).
       {
         const mintSnap      = msg.mint;
         const devWalletSnap = msg.traderPublicKey ?? "";
         const createSigSnap = msg.signature ?? "";
         const createdAtMs   = Date.now();
-        setTimeout(
-          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createSigSnap, createdAtMs, false),
-          3_000,
-        );
-        setTimeout(
-          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createSigSnap, createdAtMs, false),
-          15_000,
-        );
-        setTimeout(
-          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createSigSnap, createdAtMs, true),
-          45_000,
-        );
+        void this._startBundleDetection(mintSnap, devWalletSnap, createSigSnap, createdAtMs);
       }
 
       // DEBUG: log every message that arrives within 3s of this token's creation
@@ -417,14 +422,129 @@ export class PumpPortalAdapter implements IngestionSource {
   }
 
   /**
-   * Called 800 ms after a create event to catch Jito-bundle same-block buys that
-   * PumpPortal's subscribeTokenTrade missed (subscription didn't exist yet when
-   * PumpPortal broadcast that block).
-   *
-   * Uses standard Solana JSON-RPC getSignaturesForAddress + getTransaction and
-   * inspects pre/post account-balance diffs to find wallets that spent ≥ 7 SOL.
-   * Standard JSON-RPC only (not Helius webhooks). RPC order: BUNDLE_RPC_URL →
-   * HELIUS_RPC_URL → ALCHEMY_API → public mainnet (Helius preferred for bundle checks).
+   * Start all bundle-detection paths for a fresh mint:
+   *   1. logsSubscribe on bonding curve (typically 0.5–2s)
+   *   2. Fast signature polls at 400ms–3s (no getBlock)
+   *   3. Full getBlock fallback at 6s / 20s
+   */
+  private _startBundleDetection(
+    mint: string,
+    devWallet: string,
+    createSig: string,
+    createdAtMs: number,
+  ): void {
+    let bondingCurve: string;
+    try {
+      bondingCurve = bondingCurvePda(mint);
+    } catch {
+      return;
+    }
+
+    void this._primeCreateSlot(mint, createSig);
+    if (this.bundleLogs.enabled) {
+      this.bundleLogs.watch(mint, bondingCurve, devWallet, createdAtMs);
+    }
+
+    for (const delay of [400, 800, 1_500, 3_000]) {
+      setTimeout(
+        () => void this.heliusCatchEarlyBuy(mint, devWallet, createSig, createdAtMs, false, "fast"),
+        delay,
+      );
+    }
+    setTimeout(
+      () => void this.heliusCatchEarlyBuy(mint, devWallet, createSig, createdAtMs, false, "full"),
+      6_000,
+    );
+    setTimeout(
+      () => void this.heliusCatchEarlyBuy(mint, devWallet, createSig, createdAtMs, true, "full"),
+      20_000,
+    );
+  }
+
+  /** Resolve creation slot immediately so logsSubscribe can filter same-slot txs. */
+  private async _primeCreateSlot(mint: string, createSig: string): Promise<void> {
+    const rpcUrl = resolveBundleRpcHttp();
+    if (!rpcUrl || !createSig) return;
+    try {
+      const r = await fetch(rpcUrl, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method:  "getTransaction",
+          params:  [createSig, { encoding: "json", maxSupportedTransactionVersion: 0, commitment: "confirmed" }],
+        }),
+      });
+      const d = await r.json() as { result?: { slot?: number } };
+      const slot = d.result?.slot;
+      if (slot !== undefined) {
+        this.createSlotByMint.set(mint, slot);
+        this.bundleLogs.setCreateSlot(mint, slot);
+      }
+    } catch {
+      /* RPC warming up */
+    }
+  }
+
+  /** logsSubscribe pushed a tx touching this mint's bonding curve. */
+  private async _onBundleLogHit(hit: BundleLogHit): Promise<void> {
+    if (this.retroScanned.has(hit.mint)) return;
+
+    const knownSlot = this.createSlotByMint.get(hit.mint);
+    if (knownSlot !== undefined && hit.slot !== knownSlot) return;
+    if (knownSlot === undefined) {
+      this.createSlotByMint.set(hit.mint, hit.slot);
+      this.bundleLogs.setCreateSlot(hit.mint, hit.slot);
+    }
+
+    const rpcUrl = resolveBundleRpcHttp();
+    if (!rpcUrl) return;
+
+    const tag = `[BundleLogs ${hit.mint.slice(0, 8)}]`;
+    const detected = await this._processRetroTxSignature(
+      rpcUrl, hit.signature, hit.mint, hit.bondingCurve, hit.devWallet, hit.createdAtMs, tag,
+    );
+    if (detected) {
+      this.retroScanned.add(hit.mint);
+      this.bundleLogs.endWatch(hit.mint);
+    }
+  }
+
+  private async _processRetroTxSignature(
+    rpcUrl: string,
+    signature: string,
+    mint: string,
+    bondingCurve: string,
+    devWallet: string,
+    createdAtMs: number,
+    tag: string,
+  ): Promise<boolean> {
+    const rpcLabel = rpcUrl.includes("alchemy") ? "Alchemy"
+                   : rpcUrl.includes("helius")  ? "Helius"
+                   : "PublicRPC";
+    try {
+      const r = await fetch(rpcUrl, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method:  "getTransaction",
+          params:  [signature, { encoding: "json", maxSupportedTransactionVersion: 0, commitment: "confirmed" }],
+        }),
+      });
+      const d = await r.json() as { result?: RetroTxEnvelope; error?: { message: string } };
+      if (d.error || !d.result) return false;
+      return this._injectJitoBuyFromTx(d.result, mint, bondingCurve, devWallet, createdAtMs, tag);
+    } catch (err) {
+      console.warn(`${tag} getTransaction failed (${rpcLabel}): ${(err as Error).message}`);
+      return false;
+    }
+  }
+
+  /**
+   * HTTP retrocheck — fast mode scans signatures only; full mode also tries getBlock.
    */
   private async heliusCatchEarlyBuy(
     mint: string,
@@ -432,6 +552,7 @@ export class PumpPortalAdapter implements IngestionSource {
     createSig: string,
     createdAtMs: number,
     isRetry = false,
+    mode: "fast" | "full" = "full",
   ): Promise<void> {
     const label = (u: string) =>
       u.includes("alchemy") ? "Alchemy" : u.includes("helius") ? "Helius" : "PublicRPC";
@@ -463,7 +584,7 @@ export class PumpPortalAdapter implements IngestionSource {
     await this._enqueueRetrocheck(async () => {
       for (const rpcUrl of rpcCandidates) {
         try {
-          await this._rpcRetrocheck(rpcUrl, mint, devWallet, createSig, createdAtMs, isRetry);
+          await this._rpcRetrocheck(rpcUrl, mint, devWallet, createSig, createdAtMs, isRetry, mode);
           return;
         } catch (err) {
           const msg = (err as Error).message ?? "";
@@ -517,6 +638,7 @@ export class PumpPortalAdapter implements IngestionSource {
     createSig: string,
     createdAtMs: number,
     isRetry = false,
+    mode: "fast" | "full" = "full",
   ): Promise<void> {
     const tag = `[Retrocheck ${mint.slice(0, 8)}]`;
     if (this.retroScanned.has(mint)) return; // already scanned the creation block
@@ -587,10 +709,24 @@ export class PumpPortalAdapter implements IngestionSource {
       return;
     }
 
-    console.log(`${tag} firing via ${rpcLabel}, creation slot ${createSlot} (bc ${bondingCurve.slice(0, 8)})`);
+    const modeLabel = mode === "fast" ? "fast/sig" : "full";
+    console.log(`${tag} firing via ${rpcLabel} (${modeLabel}), creation slot ${createSlot} (bc ${bondingCurve.slice(0, 8)})`);
 
-    // ── Prefer full block scan; fall back to per-sig fetch when block isn't archived yet ──
-    let detected = 0;
+    // ── Fast path: per-tx fetch only (available seconds before getBlock) ─────────
+    let detected = await this._scanCreationSlotViaSignatures(
+      rpcCall, createSlot, bondingCurve, mint, devWallet, createdAtMs, tag,
+    );
+
+    if (detected > 0) {
+      this.retroScanned.add(mint);
+      this.bundleLogs.endWatch(mint);
+      console.log(`${tag} scan complete (signatures) — ${detected} Jito buy(s) in slot ${createSlot}`);
+      return;
+    }
+
+    if (mode === "fast") return;
+
+    // ── Full path: getBlock when archived (fallback) ────────────────────────────
     let block: { transactions?: RetroTxEnvelope[] } | null = null;
     try {
       block = (await rpcCall({
@@ -609,21 +745,12 @@ export class PumpPortalAdapter implements IngestionSource {
 
     if (block?.transactions?.length) {
       this.retroScanned.add(mint);
+      this.bundleLogs.endWatch(mint);
+      detected = 0;
       for (const t of block.transactions) {
         if (this._injectJitoBuyFromTx(t, mint, bondingCurve, devWallet, createdAtMs, tag)) detected++;
       }
       console.log(`${tag} scan complete (getBlock) — ${detected} Jito buy(s) in slot ${createSlot}`);
-      return;
-    }
-
-    // Block archive lag — scan txs in this slot via bonding-curve signatures (works earlier).
-    detected = await this._scanCreationSlotViaSignatures(
-      rpcCall, createSlot, bondingCurve, mint, devWallet, createdAtMs, tag,
-    );
-
-    if (detected > 0) {
-      this.retroScanned.add(mint);
-      console.log(`${tag} scan complete (signatures) — ${detected} Jito buy(s) in slot ${createSlot}`);
       return;
     }
 
@@ -632,6 +759,7 @@ export class PumpPortalAdapter implements IngestionSource {
     }
 
     this.retroScanned.add(mint);
+    this.bundleLogs.endWatch(mint);
     console.log(`${tag} final scan — no Jito buy in creation slot ${createSlot}`);
   }
 
