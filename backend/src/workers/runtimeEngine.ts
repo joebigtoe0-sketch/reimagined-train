@@ -31,6 +31,8 @@ import { BundleTracker } from "../services/bundle/bundleTracker.js";
 import type { BundleState } from "../services/bundle/bundleTracker.js";
 import { BundleLiveTrader } from "../services/bundle/bundleLiveTrader.js";
 import type { BundleLiveState } from "../services/bundle/bundleLiveTrader.js";
+import { getBundleSettings, setBundleSettings } from "../services/bundle/bundleSettings.js";
+import type { BundleSettings } from "../services/bundle/bundleSettings.js";
 import { RuntimeState } from "../state/runtimeState.js";
 import type { CanonicalEvent, ProbabilityRecord, TokenState } from "../types.js";
 
@@ -212,6 +214,10 @@ export class RuntimeEngine {
   disarmBundleLive(): void { this.bundleLive.disarm(); }
   resetBundleLive(): void { this.bundleLive.reset(); }
   bundleLiveState(): BundleLiveState { return this.bundleLive.state(); }
+  bundleSettings(): BundleSettings { return { ...getBundleSettings() }; }
+  updateBundleSettings(patch: Partial<BundleSettings>): BundleSettings {
+    return setBundleSettings(patch);
+  }
 
   private async refreshAlphaWallets(): Promise<void> {
     try {
@@ -332,10 +338,21 @@ export class RuntimeEngine {
   }
 
   async selfCheck() {
+    if (!env.HELIUS_WEBHOOK_ENABLED) {
+      return {
+        apiKeyOk: true,
+        programsReachable: {},
+        note:
+          "Helius webhooks DISABLED (HELIUS_WEBHOOK_ENABLED=false). " +
+          "Data: PumpPortal only. RPC: Helius (then Alchemy fallback) for Jito-bundle retrocheck only. " +
+          "Delete the Enhanced Webhook in Helius dashboard if credits are still draining.",
+      };
+    }
     return this.heliusAdapter.selfCheck();
   }
 
   async ingestWebhookPayload(payload: unknown): Promise<number> {
+    if (!env.HELIUS_WEBHOOK_ENABLED) return 0;
     const rawEvents = this.heliusAdapter.decodeWebhookPayload(payload);
     if (rawEvents.length === 0) return 0;
     this.fanoutDiscovery(rawEvents);

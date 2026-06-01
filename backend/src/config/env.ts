@@ -17,6 +17,14 @@ const envSchema = z.object({
   HELIUS_MAX_TRACKED_MINTS: z.coerce.number().default(5000),
   HELIUS_SIGNATURE_LIMIT: z.coerce.number().default(50),
   HELIUS_WEBHOOK_SECRET: z.string().optional(),
+  // Helius Enhanced Webhooks (expensive). PumpPortal is the sole trade/launch feed — keep false.
+  HELIUS_WEBHOOK_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
+  // Optional dedicated RPC for Jito-bundle retrocheck only (standard JSON-RPC, not webhooks).
+  // If unset: Helius RPC → Alchemy → public mainnet (in that order).
+  BUNDLE_RPC_URL: z.string().optional(),
   // Full Solana RPC URL (with key) used for on-chain checks like Mayhem Mode
   // detection, e.g. https://solana-mainnet.g.alchemy.com/v2/<apikey>.
   ALCHEMY_API: z.string().optional(),
@@ -48,7 +56,7 @@ const envSchema = z.object({
   // agent). Detected on-chain via the mint's owner program.
   FILTER_MAYHEM: z
     .enum(["true", "false"])
-    .default("true")
+    .default("false")
     .transform((v) => v === "true"),
 
   // ── Live trading (real money) ─────────────────────────────────────────────
@@ -70,6 +78,11 @@ const envSchema = z.object({
   // Bundle Sniper live trader — separate from the playbook live bot.
   // Bet size in SOL per bundle-sniper trade (default 0.4).
   BUNDLE_BET_SIZE: z.coerce.number().default(0.4),
+  // Flip strategy defaults (overridable from dashboard at runtime).
+  BUNDLE_MIN_TRIGGER_SOL: z.coerce.number().default(7),
+  BUNDLE_TAKE_PROFIT_PCT: z.coerce.number().default(40),
+  // Ms to hold before market exit if TP not hit; 0 = wait indefinitely for TP.
+  BUNDLE_TIMEOUT_MS: z.coerce.number().default(180_000),
   // MC threshold (USD) at which we exit before token migrates to Raydium.
   // pump.fun migration is ~$34k at SOL=$82. We exit slightly below to guarantee
   // a bonding-curve fill. Raise this env var proportionally if SOL price rises.

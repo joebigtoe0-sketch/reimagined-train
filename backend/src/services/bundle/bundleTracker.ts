@@ -21,6 +21,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CanonicalEvent, TokenState } from "../../types.js";
+import { getBundleSettings } from "./bundleSettings.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -31,8 +32,7 @@ const SUSPECT_TTL_MS  = 60 * 60_000;
 // Suspects past this MC are expired (already migrating / failed)
 const EXPIRE_MC       = 40_000;
 
-// Minimum SOL a single buy must be to count as a signal
-const MIN_TRIGGER_SOL = 7;
+// Minimum SOL trigger is read from bundleSettings (dashboard-adjustable).
 
 // ─── scoring ──────────────────────────────────────────────────────────────────
 const SCORE_BASE_TRIGGER   = 60;  // first ≥7 SOL buy (any wallet)
@@ -169,7 +169,8 @@ export class BundleTracker {
     console.log(`[BundleTracker] 🔥 Jito: ${event.mint.slice(0, 8)} +${sol.toFixed(2)} SOL from ${event.wallet.slice(0, 8)} MC=$${mc}`);
 
     const isKnownGang = this.gangWallets.has(event.wallet);
-    const isWhaleBuy  = sol >= MIN_TRIGGER_SOL && (mc < PRE_BUNDLE_MC || mc === 0);
+    const minSol = getBundleSettings().minTriggerSol;
+    const isWhaleBuy  = sol >= minSol && (mc < PRE_BUNDLE_MC || mc === 0);
 
     // Update existing suspect on every subsequent buy
     const existing = this.suspects.get(event.mint);

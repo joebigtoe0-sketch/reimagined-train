@@ -1,45 +1,32 @@
 /**
- * BundleLiveTrader — real-money execution for the Bundle Sniper strategy.
+ * BundleLiveTrader — real-money flip execution for Jito-bundle launches.
  *
- * Completely separate from the Playbook LiveTrader so they can be armed/disarmed
- * independently. Entry is triggered by BundleTracker detecting a ≥7 SOL gang-wallet
- * buy (score ≥ 60). Exit uses a 25% trailing stop from peak (no fixed MC target),
- * which the backtest showed is optimal: 73.6% win rate, +106% avg P&L over 417 trades.
- *
- * Hard stop: -30% from entry (protects the downside on the ~27% of trades that die).
- *
- * Bet size: 0.4 SOL per trade (configurable via BUNDLE_BET_SIZE env var).
+ * Entry: BundleTracker detects a same-block buy ≥ minTriggerSol (dashboard setting).
+ * Exit: take profit at takeProfitPct% from entry; optional timeout market sell.
  */
 
 import type { TokenState } from "../../types.js";
-import { env } from "../../config/env.js";
 import { PumpPortalExecutor } from "../live/pumpPortalExecutor.js";
+import { env } from "../../config/env.js";
+import { getBundleSettings } from "./bundleSettings.js";
+import type { BundleSettings } from "./bundleSettings.js";
 import type { BundleSuspect } from "./bundleTracker.js";
 
-// ─── constants ────────────────────────────────────────────────────────────────
-const BET_SIZE = env.BUNDLE_BET_SIZE ?? 0.4;
-const MAX_OPEN = 5;                   // max simultaneous bundle positions
-const TRAIL_FRAC = 0.25;             // exit when MC drops 25% from peak
-const HARD_STOP_FRAC = 0.70;        // hard stop at -30% from entry
-// Migration exit: sell before the gang can dump on Raydium.
-// pump.fun migration threshold moves with SOL price. At $82/SOL it's ~$34k.
-// We exit slightly below that to guarantee a fill inside the bonding curve.
-// Adjust BUNDLE_MIGRATION_MC in env if SOL price changes significantly.
-const MIGRATION_EXIT_MC = env.BUNDLE_MIGRATION_MC ?? 30_000;
+const MAX_OPEN = 5;
 const MAX_SELL_ATTEMPTS = 5;
 const SELL_BACKOFF_BASE_MS = 8_000;
 
 function round(n: number) { return Math.round(n * 1000) / 1000; }
 
-// ─── types ────────────────────────────────────────────────────────────────────
 interface BundlePos {
   mint: string;
   symbol: string;
   entryMc: number;
   currentMc: number;
-  peakMc: number;
+  targetMc: number;
   solIn: number;
   entryAt: string;
+  entryAtMs: number;
   txBuy?: string;
   selling: boolean;
   sellAttempts: number;
@@ -51,6 +38,7 @@ export interface BundleLivePosition {
   symbol: string;
   entryMc: number;
   currentMc: number;
+  targetMc: number;
   peakMc: number;
   solIn: number;
   value: number;
@@ -78,6 +66,7 @@ export interface BundleLiveTrade {
 export interface BundleLiveState {
   available: boolean;
   armed: boolean;
+  config: BundleSettings;
   betSize: number;
   openCount: number;
   tradeCount: number;
@@ -89,7 +78,6 @@ export interface BundleLiveState {
   trades: BundleLiveTrade[];
 }
 
-// ─── trader ──────────────────────────────────────────────────────────────────
 export class BundleLiveTrader {
   private armed = false;
   private dailyPnl = 0;
@@ -122,7 +110,11 @@ export class BundleLiveTrader {
   arm(): void {
     if (!this.available) { console.warn("[BundleLive] cannot arm — no wallet key"); return; }
     this.armed = true;
-    console.log("[BundleLive] ARMED — bundle trades will execute (0.4 SOL/trade, 25% trail)");
+    const c = getBundleSettings();
+    console.log(
+      `[BundleLive] ARMED — flip ${c.takeProfitPct}% TP, ≥${c.minTriggerSol}◎ trigger, ` +
+      `${c.timeoutMs ? c.timeoutMs / 1000 + "s timeout" : "no timeout"}, ${c.betSize}◎/trade`,
+    );
   }
 
   disarm(): void { this.armed = false; console.log("[BundleLive] disarmed"); }
@@ -136,44 +128,37 @@ export class BundleLiveTrader {
 
   openMints(): string[] { return [...this.positions.keys()]; }
 
-  /**
-   * Called by BundleTracker when a new high-confidence suspect is detected
-   * (score ≥ 60, meaning a ≥7 SOL gang-wallet buy was seen pre-bundle).
-   */
   onSuspect(suspect: BundleSuspect): void {
     if (!this.armed || !this.executor) return;
     if (this.traded.has(suspect.mint)) return;
     if (this.positions.size >= MAX_OPEN) return;
-    // Same-block Jito buys come from the RPC retrocheck with MC unknown (0) — that's
-    // EXPECTED and means we're entering at launch. Previously `currentMc <= 0` here
-    // silently rejected every Jito bundle. Only skip if MC is known AND already too high.
     if (suspect.currentMc >= 25_000) return;
 
     this.traded.add(suspect.mint);
     void this.executeBuy(suspect);
   }
 
-  /** Called on every token tick — update MC and check trailing/hard stop exits. */
   onToken(token: TokenState): void {
     const pos = this.positions.get(token.mint);
     if (!pos) return;
     if (token.symbol) pos.symbol = token.symbol;
 
     const dead = token.lifecycle === "dead" || token.lifecycle === "failed";
+    const cfg = getBundleSettings();
 
     if (token.marketCap > 0) {
-      // Same-block Jito entries are booked with MC unknown (0). Anchor the position's
-      // cost basis to the FIRST real MC tick we receive, then run normal exit logic.
       if (pos.entryMc <= 0) {
-        pos.entryMc = pos.peakMc = pos.currentMc = token.marketCap;
-        console.log(`[BundleLive] ${pos.symbol} entry MC anchored @ $${Math.round(token.marketCap)}`);
-        return; // basis just established — no exit check this tick
+        pos.entryMc = token.marketCap;
+        pos.currentMc = token.marketCap;
+        pos.targetMc = pos.entryMc * (1 + cfg.takeProfitPct / 100);
+        console.log(
+          `[BundleLive] ${pos.symbol} entry @ $${Math.round(pos.entryMc)} → target $${Math.round(pos.targetMc)} (+${cfg.takeProfitPct}%)`,
+        );
+        return;
       }
       pos.currentMc = token.marketCap;
     }
 
-    // Without a real basis yet, the trailing/hard-stop math is meaningless.
-    // Only act if the token is already dead → write the position off.
     if (pos.entryMc <= 0) {
       if (dead) void this.executeSell(pos, "dead");
       return;
@@ -184,17 +169,20 @@ export class BundleLiveTrader {
 
   private async executeBuy(suspect: BundleSuspect): Promise<void> {
     if (!this.executor) return;
+    const cfg = getBundleSettings();
     try {
-      const result = await this.executor.execute("buy", suspect.mint, BET_SIZE);
+      const result = await this.executor.execute("buy", suspect.mint, cfg.betSize);
       const mc = suspect.currentMc || suspect.detectionMc;
+      const targetMc = mc > 0 ? mc * (1 + cfg.takeProfitPct / 100) : 0;
       this.positions.set(suspect.mint, {
         mint: suspect.mint,
         symbol: suspect.symbol,
         entryMc: mc,
         currentMc: mc,
-        peakMc: mc,
-        solIn: BET_SIZE,
+        targetMc,
+        solIn: cfg.betSize,
         entryAt: new Date().toISOString(),
+        entryAtMs: Date.now(),
         txBuy: result.signature,
         selling: false,
         sellAttempts: 0,
@@ -212,17 +200,19 @@ export class BundleLiveTrader {
     if (pos.selling) return;
     if (Date.now() < pos.nextSellAt) return;
 
-    if (pos.currentMc > pos.peakMc) pos.peakMc = pos.currentMc;
+    const cfg = getBundleSettings();
+    if (pos.targetMc <= 0 && pos.entryMc > 0) {
+      pos.targetMc = pos.entryMc * (1 + cfg.takeProfitPct / 100);
+    }
 
     let reason: string | null = null;
-    // Migration exit: sell before token migrates to Raydium (where gang will dump).
-    // This is the primary profit-taking exit for bundle-pump tokens.
-    if (pos.currentMc >= MIGRATION_EXIT_MC) reason = "migration";
-    // Hard stop: -30% from entry
-    else if (pos.currentMc <= pos.entryMc * HARD_STOP_FRAC) reason = "stop";
-    // Trailing stop: 25% off peak (catches reversals mid-bonding-curve)
-    else if (pos.peakMc > pos.entryMc && pos.currentMc <= pos.peakMc * (1 - TRAIL_FRAC)) reason = "trail";
-    else if (dead) reason = "dead";
+    if (pos.entryMc > 0 && pos.currentMc >= pos.targetMc) {
+      reason = `tp${cfg.takeProfitPct}`;
+    } else if (cfg.timeoutMs > 0 && Date.now() - pos.entryAtMs >= cfg.timeoutMs) {
+      reason = "timeout";
+    } else if (dead) {
+      reason = "dead";
+    }
 
     if (reason) void this.executeSell(pos, reason);
   }
@@ -234,7 +224,6 @@ export class BundleLiveTrader {
 
     try {
       const result = await this.executor.execute("sell", pos.mint, "100%");
-      // No basis established (died before first MC tick) → treat as total loss.
       const ratio = pos.entryMc > 0 ? pos.currentMc / pos.entryMc : 0;
       const solOut = round(pos.solIn * ratio * 0.94);
       const pnl = round(solOut - pos.solIn);
@@ -277,7 +266,7 @@ export class BundleLiveTrader {
 
       const backoffMs = Math.min(
         is429 ? 60_000 : 30_000,
-        SELL_BACKOFF_BASE_MS * Math.pow(2, pos.sellAttempts - 1)
+        SELL_BACKOFF_BASE_MS * Math.pow(2, pos.sellAttempts - 1),
       );
       pos.nextSellAt = Date.now() + backoffMs;
       pos.selling = false;
@@ -286,13 +275,16 @@ export class BundleLiveTrader {
   }
 
   state(): BundleLiveState {
+    const cfg = getBundleSettings();
     const positions: BundleLivePosition[] = [];
     for (const p of this.positions.values()) {
       const ratio = p.entryMc > 0 ? p.currentMc / p.entryMc : 1;
       const value = p.solIn * ratio;
+      const targetMc = p.targetMc > 0 ? p.targetMc : p.entryMc * (1 + cfg.takeProfitPct / 100);
       positions.push({
         mint: p.mint, symbol: p.symbol,
-        entryMc: Math.round(p.entryMc), currentMc: Math.round(p.currentMc), peakMc: Math.round(p.peakMc),
+        entryMc: Math.round(p.entryMc), currentMc: Math.round(p.currentMc),
+        targetMc: Math.round(targetMc), peakMc: Math.round(Math.max(p.currentMc, p.entryMc)),
         solIn: p.solIn, value: round(value),
         pnlPct: p.solIn > 0 ? round(((value - p.solIn) / p.solIn) * 100) : 0,
         entryAt: p.entryAt, txBuy: p.txBuy,
@@ -303,7 +295,8 @@ export class BundleLiveTrader {
     return {
       available: this.available,
       armed: this.armed,
-      betSize: BET_SIZE,
+      config: { ...cfg },
+      betSize: cfg.betSize,
       openCount: this.positions.size,
       tradeCount, wins: this.wins, losses: this.losses,
       winRate: tradeCount > 0 ? round((this.wins / tradeCount) * 100) : 0,

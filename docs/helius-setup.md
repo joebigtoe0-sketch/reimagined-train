@@ -1,5 +1,10 @@
 # Helius Live Setup
 
+> **Current architecture (2026):** PumpPortal WebSocket is the only launch/trade feed.
+> Helius should be used **only** for Jito-bundle retrocheck (standard JSON-RPC).
+> Set `HELIUS_WEBHOOK_ENABLED=false` and **delete any Enhanced Webhook** in the
+> Helius dashboard — webhook events are what burn millions of credits per hour.
+
 This guide connects the backend to real Helius data using:
 - RPC polling (`getSignaturesForAddress` + enhanced transaction decode)
 - Webhook ingestion (`POST /webhooks/helius`)

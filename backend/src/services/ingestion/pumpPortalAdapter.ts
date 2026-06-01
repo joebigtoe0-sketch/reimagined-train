@@ -18,6 +18,7 @@
 import { WebSocket } from "ws";
 import { PublicKey } from "@solana/web3.js";
 import { env } from "../../config/env.js";
+import { getBundleSettings } from "../bundle/bundleSettings.js";
 import type { IngestionSource, LaunchInfo, TradeInfo, MigrationInfo } from "./ingestionSource.js";
 
 // Pump.fun on-chain program — used to derive the bonding curve PDA for each token.
@@ -263,29 +264,20 @@ export class PumpPortalAdapter implements IngestionSource {
       // are NEVER delivered via subscribeTokenTrade because our subscription
       // doesn't exist yet when PumpPortal broadcasts that block. Patch the gap
       // by querying the Solana RPC using balance-diff parsing.
-      // We try at T+800ms then again at T+2000ms in case the indexer was slow.
+      // Two retrocheck attempts (was four) — each is getTransaction + getBlock ≈ 2 RPC calls.
+      // First success sets retroScanned and skips the second.
       {
         const mintSnap      = msg.mint;
         const devWalletSnap = msg.traderPublicKey ?? "";
-        const createSigSnap = msg.signature ?? "";   // create tx sig → exact creation slot
+        const createSigSnap = msg.signature ?? "";
         const createdAtMs   = Date.now();
         setTimeout(
           () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createSigSnap, createdAtMs, false),
-          800
+          1_000,
         );
-        setTimeout(
-          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createSigSnap, createdAtMs, false),
-          2000
-        );
-        // Sweep at T+8s: most Jito bundle txs are indexed by now.
-        setTimeout(
-          () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createSigSnap, createdAtMs, false),
-          8000
-        );
-        // Final sweep at T+20s: insurance for slow RPC indexers (seen >8s lag on Helius).
         setTimeout(
           () => void this.heliusCatchEarlyBuy(mintSnap, devWalletSnap, createSigSnap, createdAtMs, true),
-          20000
+          8_000,
         );
       }
 
@@ -404,8 +396,8 @@ export class PumpPortalAdapter implements IngestionSource {
    *
    * Uses standard Solana JSON-RPC getSignaturesForAddress + getTransaction and
    * inspects pre/post account-balance diffs to find wallets that spent ≥ 7 SOL.
-   * No Helius enhanced-API credits needed — tries HELIUS_RPC_URL first, then
-   * ALCHEMY_API, then the public mainnet endpoint.
+   * Standard JSON-RPC only (not Helius webhooks). RPC order: BUNDLE_RPC_URL →
+   * HELIUS_RPC_URL → ALCHEMY_API → public mainnet (Helius preferred for bundle checks).
    */
   private async heliusCatchEarlyBuy(
     mint: string,
@@ -419,11 +411,15 @@ export class PumpPortalAdapter implements IngestionSource {
 
     const now = Date.now();
     const allCandidates: string[] = [];
-    if (env.HELIUS_RPC_URL && !env.HELIUS_RPC_URL.endsWith("api-key=")) {
-      allCandidates.push(env.HELIUS_RPC_URL);
+    if (env.BUNDLE_RPC_URL) {
+      allCandidates.push(env.BUNDLE_RPC_URL);
+    } else {
+      if (env.HELIUS_RPC_URL && !env.HELIUS_RPC_URL.endsWith("api-key=")) {
+        allCandidates.push(env.HELIUS_RPC_URL);
+      }
+      if (env.ALCHEMY_API) allCandidates.push(env.ALCHEMY_API);
+      allCandidates.push("https://api.mainnet-beta.solana.com");
     }
-    if (env.ALCHEMY_API) allCandidates.push(env.ALCHEMY_API);
-    allCandidates.push("https://api.mainnet-beta.solana.com");
 
     // Skip endpoints still in their cooldown window
     const rpcCandidates = allCandidates.filter((u) => {
@@ -612,11 +608,13 @@ export class PumpPortalAdapter implements IngestionSource {
       // pre/post arrays cover ALL accounts (static + ALT-loaded) in matching order.
       for (let i = 0; i < pre.length; i++) {
         const deltaLamports = (post[i] ?? 0) - (pre[i] ?? 0);
-        if (deltaLamports >= -7_000_000_000) continue;       // spent < 7 SOL
+        const minSol = getBundleSettings().minTriggerSol;
+        const minLamports = minSol * 1_000_000_000;
+        if (deltaLamports >= -minLamports) continue;
         const account = keys[i] || `idx-${i}`;
         if (!account || account === devWallet) continue;     // skip dev self-buy
         const sol = Math.abs(deltaLamports) / 1e9 - 0.01;    // minus fee/tip overhead
-        if (sol < 7) continue;
+        if (sol < minSol) continue;
 
         const dedupKey = `${sig}:${mint}:buy`;
         if (this.seenTradeSigs.has(dedupKey)) break;

@@ -163,11 +163,19 @@ export type BundleState = {
   totalDetected: number;
 };
 
+export type BundleSettings = {
+  minTriggerSol: number;
+  takeProfitPct: number;
+  timeoutMs: number;
+  betSize: number;
+};
+
 export type BundleLivePosition = {
   mint: string;
   symbol: string;
   entryMc: number;
   currentMc: number;
+  targetMc: number;
   peakMc: number;
   solIn: number;
   value: number;
@@ -195,6 +203,7 @@ export type BundleLiveTrade = {
 export type BundleLiveState = {
   available: boolean;
   armed: boolean;
+  config: BundleSettings;
   betSize: number;
   openCount: number;
   tradeCount: number;

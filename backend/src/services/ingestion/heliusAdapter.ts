@@ -218,7 +218,7 @@ export class HeliusAdapter {
       ? "API key rejected — check HELIUS_API_KEY value"
       : !allReachable
       ? "Some Pump.fun programs unreachable — check Helius plan limits"
-      : `Polling ${this.globalAddresses.length} program(s) + ${this.trackedMints.size} discovered mints. Webhook URL must be set in Helius dashboard → Enhanced Webhooks → add address 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P`;
+      : `Legacy Helius REST polling available but NOT used — ingest is PumpPortal. Set HELIUS_WEBHOOK_ENABLED=true only if you intentionally want webhooks.`;
 
     return { apiKeyOk, programsReachable, note };
   }

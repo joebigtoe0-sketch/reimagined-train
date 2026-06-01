@@ -84,6 +84,17 @@ app.post("/api/paper/stop", async () => { engine.stopPaper(); return { paper: en
 app.post("/api/paper/reset", async () => { engine.resetPaper(); return { paper: engine.paperState() }; });
 
 app.get("/api/bundle", async () => ({ bundle: engine.bundleState() }));
+app.get("/api/bundle/settings", async () => ({
+  settings: engine.bundleSettings(),
+  bundleLive: engine.bundleLiveState(),
+}));
+app.patch<{ Body: { minTriggerSol?: number; takeProfitPct?: number; timeoutMs?: number; betSize?: number } }>(
+  "/api/bundle/settings",
+  async (request) => {
+    engine.updateBundleSettings(request.body ?? {});
+    return { settings: engine.bundleSettings(), bundleLive: engine.bundleLiveState() };
+  },
+);
 app.get("/api/bundle/live", async () => ({ bundleLive: engine.bundleLiveState() }));
 app.post("/api/bundle/live/arm", async () => { engine.armBundleLive(); return { bundleLive: engine.bundleLiveState() }; });
 app.post("/api/bundle/live/disarm", async () => { engine.disarmBundleLive(); return { bundleLive: engine.bundleLiveState() }; });
@@ -137,7 +148,22 @@ app.post("/api/alerts/simulate", async (request) => {
   const body = request.body as { token: TokenState };
   return { alerts: evaluateAlerts(body.token) };
 });
+// Helius webhook counter — surfaced when disabled so ops can see stray dashboard traffic.
+let heliusWebhookRejected = 0;
+
 app.post("/webhooks/helius", async (request, reply) => {
+  if (!env.HELIUS_WEBHOOK_ENABLED) {
+    heliusWebhookRejected++;
+    if (heliusWebhookRejected === 1 || heliusWebhookRejected % 500 === 0) {
+      app.log.warn(
+        { rejected: heliusWebhookRejected },
+        "Helius webhook received but HELIUS_WEBHOOK_ENABLED=false — " +
+        "disable/delete the webhook in Helius dashboard to stop burning credits",
+      );
+    }
+    return { ok: true, ignored: true, reason: "webhooks_disabled" };
+  }
+
   const webhookSecret = env.HELIUS_WEBHOOK_SECRET;
   const xHeliusSecret = request.headers["x-helius-secret"];
   const authorization = request.headers["authorization"];

@@ -249,13 +249,14 @@ function actionStyle(a?: string): React.CSSProperties {
   }
 }
 
-function TerminalView({ tokens, search, onSelectToken, paper, onPaperControl, live, onLiveControl, bundle, bundleLive, onBundleLiveControl }: {
+function TerminalView({ tokens, search, onSelectToken, paper, onPaperControl, live, onLiveControl, bundle, bundleLive, onBundleLiveControl, onBundleLiveUpdate }: {
   tokens: TokenState[]; search: string; onSelectToken: (t: TokenState) => void;
   paper: PaperState | null; onPaperControl: (action: "start" | "stop" | "reset") => void;
   live: LiveState | null; onLiveControl: (action: "arm" | "disarm" | "reset") => void;
   bundle: BundleState | null;
   bundleLive: BundleLiveState | null;
   onBundleLiveControl: (action: "arm" | "disarm" | "reset") => void;
+  onBundleLiveUpdate: (state: BundleLiveState) => void;
 }): ReactElement {
   const [sortKey, setSortKey] = useState<SortKey>("createdAt");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
@@ -456,7 +457,7 @@ function TerminalView({ tokens, search, onSelectToken, paper, onPaperControl, li
         </div>
         <PaperBotPanel paper={paper} onControl={onPaperControl} onSelectToken={onSelectToken} tokens={tokens} />
         <LiveBotPanel live={live} onControl={onLiveControl} onSelectToken={onSelectToken} tokens={tokens} />
-        <BundleSniperPanel bundle={bundle} bundleLive={bundleLive} onBundleLiveControl={onBundleLiveControl} />
+        <BundleSniperPanel bundle={bundle} bundleLive={bundleLive} onBundleLiveControl={onBundleLiveControl} onBundleLiveUpdate={onBundleLiveUpdate} />
       </div>
     </div>
   );
@@ -1441,15 +1442,50 @@ function DevsView({ developers, search, onSelectToken, tokens }: {
 }
 
 // ─── BUNDLE SNIPER PANEL ─────────────────────────────────────────────────────
-function BundleSniperPanel({ bundle, bundleLive, onBundleLiveControl }: {
+function BundleSniperPanel({ bundle, bundleLive, onBundleLiveControl, onBundleLiveUpdate }: {
   bundle: BundleState | null;
   bundleLive: BundleLiveState | null;
   onBundleLiveControl: (action: "arm" | "disarm" | "reset") => void;
+  onBundleLiveUpdate: (state: BundleLiveState) => void;
 }): ReactElement {
   const suspects = bundle?.suspects ?? [];
   const gangCount = bundle?.gangWalletCount ?? 0;
   const totalDetected = bundle?.totalDetected ?? 0;
   const bl = bundleLive;
+
+  const [minSol, setMinSol] = useState(7);
+  const [tpPct, setTpPct] = useState(40);
+  const [timeoutSec, setTimeoutSec] = useState(180);
+  const [betSize, setBetSize] = useState(0.4);
+  const [savingCfg, setSavingCfg] = useState(false);
+
+  useEffect(() => {
+    const c = bundleLive?.config;
+    if (!c) return;
+    setMinSol(c.minTriggerSol);
+    setTpPct(c.takeProfitPct);
+    setTimeoutSec(Math.round(c.timeoutMs / 1000));
+    setBetSize(c.betSize);
+  }, [bundleLive?.config]);
+
+  const saveBundleSettings = useCallback(async () => {
+    setSavingCfg(true);
+    try {
+      const r = await fetch(`${API_BASE}/api/bundle/settings`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          minTriggerSol: Number(minSol),
+          takeProfitPct: Number(tpPct),
+          timeoutMs: Math.round(Number(timeoutSec) * 1000),
+          betSize: Number(betSize),
+        }),
+      });
+      const j = await r.json() as { bundleLive?: BundleLiveState };
+      if (j.bundleLive) onBundleLiveUpdate(j.bundleLive);
+    } catch { /* backend busy */ }
+    finally { setSavingCfg(false); }
+  }, [minSol, tpPct, timeoutSec, betSize, onBundleLiveUpdate]);
 
   const scoreColor = (s: number) =>
     s >= 80 ? "var(--up)" : s >= 50 ? "#f59e0b" : "var(--text-2)";
@@ -1464,7 +1500,7 @@ function BundleSniperPanel({ bundle, bundleLive, onBundleLiveControl }: {
       <div className="panel-hdr" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <span className="title">🎯 BUNDLE SNIPER</span>
         <span className="dim" style={{ fontSize: 10 }}>
-          ≥7◎ gate · {totalDetected} detected · {gangCount.toLocaleString()} known gang
+          ≥{bl?.config?.minTriggerSol ?? minSol}◎ · +{bl?.config?.takeProfitPct ?? tpPct}% flip · {totalDetected} detected
         </span>
       </div>
 
@@ -1488,7 +1524,7 @@ function BundleSniperPanel({ bundle, bundleLive, onBundleLiveControl }: {
             </span>
             {bl && (
               <span className="dim" style={{ fontSize: 10 }}>
-                {bl.betSize}◎/trade · {bl.openCount} open
+                {bl.config?.betSize ?? bl.betSize}◎/trade · {bl.openCount} open
               </span>
             )}
           </div>
@@ -1530,6 +1566,60 @@ function BundleSniperPanel({ bundle, bundleLive, onBundleLiveControl }: {
           </div>
         </div>
 
+        {/* Strategy settings */}
+        <div style={{
+          marginTop: 8, padding: "8px 0 0",
+          borderTop: "1px solid var(--border)",
+          display: "grid",
+          gridTemplateColumns: "repeat(4, 1fr) auto",
+          gap: 6, alignItems: "end",
+        }}>
+          <label style={{ fontSize: 9, color: "var(--text-3)" }}>
+            Min bundle (◎)
+            <input type="number" min={1} max={50} step={0.5} value={minSol}
+              onChange={(e) => setMinSol(+e.target.value)}
+              style={{ display: "block", width: "100%", marginTop: 2, fontSize: 11, padding: "3px 4px", background: "var(--bg)", border: "1px solid var(--border)", color: "var(--fg)" }}
+            />
+          </label>
+          <label style={{ fontSize: 9, color: "var(--text-3)" }}>
+            Take profit (%)
+            <input type="number" min={5} max={200} step={5} value={tpPct}
+              onChange={(e) => setTpPct(+e.target.value)}
+              style={{ display: "block", width: "100%", marginTop: 2, fontSize: 11, padding: "3px 4px", background: "var(--bg)", border: "1px solid var(--border)", color: "var(--fg)" }}
+            />
+          </label>
+          <label style={{ fontSize: 9, color: "var(--text-3)" }}>
+            Timeout (sec)
+            <input type="number" min={0} max={3600} step={30} value={timeoutSec}
+              onChange={(e) => setTimeoutSec(+e.target.value)}
+              title="0 = wait for TP only"
+              style={{ display: "block", width: "100%", marginTop: 2, fontSize: 11, padding: "3px 4px", background: "var(--bg)", border: "1px solid var(--border)", color: "var(--fg)" }}
+            />
+          </label>
+          <label style={{ fontSize: 9, color: "var(--text-3)" }}>
+            Bet size (◎)
+            <input type="number" min={0.01} max={10} step={0.05} value={betSize}
+              onChange={(e) => setBetSize(+e.target.value)}
+              style={{ display: "block", width: "100%", marginTop: 2, fontSize: 11, padding: "3px 4px", background: "var(--bg)", border: "1px solid var(--border)", color: "var(--fg)" }}
+            />
+          </label>
+          <button
+            type="button"
+            onClick={() => void saveBundleSettings()}
+            disabled={savingCfg}
+            style={{
+              background: "rgba(255,255,255,0.1)", color: "var(--fg)", border: "1px solid var(--border)",
+              borderRadius: 4, padding: "6px 10px", fontSize: 10, fontWeight: 600, cursor: savingCfg ? "wait" : "pointer",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {savingCfg ? "…" : "APPLY"}
+          </button>
+        </div>
+        <div className="dim" style={{ fontSize: 9, marginTop: 4 }}>
+          Flip: buy Jito bundle → sell at +{tpPct}% MC (timeout {timeoutSec === 0 ? "off" : `${timeoutSec}s`})
+        </div>
+
         {/* P&L summary row */}
         {bl && bl.tradeCount > 0 && (
           <div style={{ display: "flex", gap: 14, marginTop: 6, fontSize: 10 }}>
@@ -1550,7 +1640,7 @@ function BundleSniperPanel({ bundle, bundleLive, onBundleLiveControl }: {
                   style={{ color: "var(--fg)", textDecoration: "none", fontWeight: 600 }}>
                   ${p.symbol}
                 </a>
-                <span className="dim">MC ${fmtMC(p.currentMc)} / peak ${fmtMC(p.peakMc)}</span>
+                <span className="dim">MC ${fmtMC(p.currentMc)} → ${fmtMC(p.targetMc)}</span>
                 <span style={{ color: pnlColor(p.pnlPct) }}>{p.pnlPct > 0 ? "+" : ""}{p.pnlPct.toFixed(1)}%</span>
               </div>
             ))}
@@ -1810,6 +1900,10 @@ export default function Home(): ReactElement {
     } catch { /* backend busy */ }
   }, []);
 
+  const onBundleLiveUpdate = useCallback((state: BundleLiveState) => {
+    setBundleLive(state);
+  }, []);
+
   return (
     <div className="app">
       <Header search={search} setSearch={setSearch} coverage={coverage} wsConnected={wsConnected} />
@@ -1817,7 +1911,7 @@ export default function Home(): ReactElement {
 
       <div style={{ minHeight: 0, overflow: "hidden", position: "relative" }}>
         {tab === "terminal" && (
-          <TerminalView tokens={tokens} search={search} onSelectToken={handleSelectToken} paper={paper} onPaperControl={paperControl} live={live} onLiveControl={liveControl} bundle={bundle} bundleLive={bundleLive} onBundleLiveControl={bundleLiveControl} />
+          <TerminalView tokens={tokens} search={search} onSelectToken={handleSelectToken} paper={paper} onPaperControl={paperControl} live={live} onLiveControl={liveControl} bundle={bundle} bundleLive={bundleLive} onBundleLiveControl={bundleLiveControl} onBundleLiveUpdate={onBundleLiveUpdate} />
         )}
         {tab === "token" && (
           <TokenView token={selectedToken} onSelectToken={handleSelectToken} paper={paper} />
